@@ -368,16 +368,78 @@ app.post("/api/messages", async (req, res) =>
   res.json(await sourceRequest(req.body, "messages")),
 );
 
-async function samsaraPage(token, endpoint, params = {}) {
+// The deadline covers pagination, retries and response bodies, not just headers.
+async function deadline(ms, parent, label, task) {
+  const controller = new AbortController();
+  let rejectExpired;
+  const expired = new Promise((_, reject) => { rejectExpired = reject; });
+  const stop = () => {
+    const error = parent?.aborted && parent.reason instanceof Error
+      ? parent.reason : new Error(`${label} timed out. Please retry.`);
+    controller.abort(error);
+    rejectExpired(error);
+  };
+  const timer = setTimeout(stop, ms);
+  parent?.addEventListener("abort", stop, { once: true });
+  if (parent?.aborted) stop();
+  try {
+    return await Promise.race([
+      expired,
+      Promise.resolve().then(() => {
+        controller.signal.throwIfAborted();
+        return task(controller.signal);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+    parent?.removeEventListener("abort", stop);
+    controller.abort();
+  }
+}
+async function samsaraRead(token, endpoint, params, signal) {
+  const url = `https://api.samsara.com${endpoint}?${new URLSearchParams(params)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    signal.throwIfAborted();
+    try {
+      return await deadline(12000, signal, `Samsara ${endpoint}`, async (requestSignal) => {
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` },
+          signal: requestSignal,
+          redirect: "error",
+        });
+        if (!response.ok) {
+          await response.body?.cancel();
+          const detail = response.status === 401 ? "token rejected; check this Samsara API key"
+            : response.status === 403 ? "permission denied; check vehicle/stat access"
+            : response.status === 429 ? "rate limit reached"
+            : "upstream request failed";
+          const error = new Error(`Samsara ${endpoint}: HTTP ${response.status} — ${detail}.`);
+          error.status = response.status;
+          throw error;
+        }
+        return await response.json();
+      });
+    } catch (error) {
+      signal.throwIfAborted();
+      if (error.status && error.status !== 429 && error.status < 500) throw error;
+      if (attempt === 1) {
+        if (error.status || /timed out/.test(error.message)) throw error;
+        throw new Error(`Samsara ${endpoint} could not be reached or returned an invalid response.`);
+      }
+      await deadline(1500, signal, "Samsara retry", () => wait(500));
+    }
+  }
+}
+async function samsaraPage(token, endpoint, params = {}, signal) {
+  if (!signal) return deadline(45000, null, `Samsara ${endpoint}`, (s) => samsaraPage(token, endpoint, params, s));
   const all = [],
     seen = new Set();
   let after = params.after,
     cursor = null;
   for (let page = 0; page < 500; page++) {
+    signal.throwIfAborted();
     const q = new URLSearchParams({ ...params, ...(after ? { after } : {}) });
-    const value = await fetchData(`https://api.samsara.com${endpoint}?${q}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const value = await samsaraRead(token, endpoint, q, signal);
     const rows = Array.isArray(value.data)
       ? value.data
       : value.data?.vehicleReports || [];
@@ -421,42 +483,32 @@ function mergeStat(old = {}, next = {}) {
 async function tokenFleet(token) {
   const key = hash(token);
   return cached(`fleet:${key}`, 50000, async () => {
-    const vehicles = (
-      await cached(`vehicles:${key}`, 600000, () =>
-        samsaraPage(token, "/fleet/vehicles", { limit: "512" }),
-      )
-    ).rows;
-    let state = statState.get(key) || { cursors: {}, stats: new Map() };
-    // Samsara accepts at most four stat types per request.
-    for (const types of [
-      "gps,fuelPercents,obdOdometerMeters,gpsOdometerMeters",
-      "engineStates",
-    ]) {
-      let response;
-      try {
-        response = await samsaraPage(token, "/fleet/vehicles/stats/feed", {
-          types,
-          ...(state.cursors[types] ? { after: state.cursors[types] } : {}),
-        });
-        state.cursors[types] = response.cursor;
-      } catch {
-        try {
-          response = await samsaraPage(token, "/fleet/vehicles/stats", {
-            types,
-          });
-          state.cursors[types] = null;
-        } catch (e) {
-          if (types === "engineStates") continue;
-          throw e;
-        }
+    const previous = statState.get(key) || new Map();
+    const stats = new Map(previous), warnings = [];
+    // Snapshot is appropriate for a periodic current-value display. A feed can
+    // require draining an event backlog after an idle/recreated server instance.
+    const groups = ["gps,fuelPercents,obdOdometerMeters", "gpsOdometerMeters,engineStates"];
+    const results = await deadline(45000, null, "Samsara fleet connection", (signal) => Promise.allSettled([
+      cached(`vehicles:${key}`, 600000, () => samsaraPage(token, "/fleet/vehicles", { limit: "512" }, signal)),
+      ...groups.map((types) => deadline(25000, signal, `Samsara stats (${types})`, (s) =>
+        samsaraPage(token, "/fleet/vehicles/stats", { types }, s))),
+    ]));
+    if (results[0].status === "rejected") throw results[0].reason;
+    const vehicles = results[0].value.rows;
+    results.slice(1).forEach((result) => {
+      if (result.status === "rejected") {
+        warnings.push(result.reason.message);
+        return;
       }
-      for (const s of response.rows)
-        state.stats.set(s.id, mergeStat(state.stats.get(s.id), s));
-    }
-    statState.set(key, state);
+      for (const s of result.value.rows) stats.set(s.id, mergeStat(stats.get(s.id), s));
+    });
+    // Retain measurement timestamps when a diagnostic is temporarily unavailable.
+    const activeIds = new Set(vehicles.map((v) => v.id));
+    for (const id of stats.keys()) if (!activeIds.has(id)) stats.delete(id);
+    statState.set(key, stats);
     while (statState.size > 100)
       statState.delete(statState.keys().next().value);
-    return vehicles.map((v) => ({
+    return { warnings, vehicles: vehicles.map((v) => ({
       id: v.id,
       name: v.name || v.id,
       vin: v.vin || "",
@@ -464,8 +516,8 @@ async function tokenFleet(token) {
       model: v.model || "",
       year: v.year ?? null,
       licensePlate: v.licensePlate || "",
-      stats: state.stats.get(v.id) || {},
-    }));
+      stats: stats.get(v.id) || {},
+    })) };
   });
 }
 function publicVehicle(v) {
@@ -503,18 +555,20 @@ async function getClient(id) {
   return c;
 }
 app.get("/api/fleet", async (req, res) => {
-  const client = await getClient(req.query.client);
+  const client = await deadline(60000, null, "Google Master lookup", () => getClient(req.query.client));
+  const started = Date.now();
   const results = await Promise.allSettled(client.tokens.map(tokenFleet));
   const combined = new Map(),
     warnings = [];
   results.forEach((result, i) => {
     if (result.status === "rejected") {
       warnings.push(
-        `Connection ${i + 1} could not load its fleet. Other connections are still available.`,
+        `Connection ${i + 1}: ${result.reason.message}`,
       );
       return;
     }
-    for (const v of result.value) {
+    warnings.push(...result.value.warnings.map((message) => `Connection ${i + 1}: ${message}`));
+    for (const v of result.value.vehicles) {
       const old = combined.get(v.id);
       combined.set(
         v.id,
@@ -522,10 +576,12 @@ app.get("/api/fleet", async (req, res) => {
       );
     }
   });
+  // Logs contain endpoint/status diagnostics, never tokens or vehicle locations.
+  if (warnings.length) console.warn("[Fuelio fleet]", JSON.stringify({
+    client: client.id, elapsedMs: Date.now() - started, warnings,
+  }));
   if (results.every((r) => r.status === "rejected"))
-    throw new Error(
-      "No Samsara connection responded. Check the API permissions or enter values manually.",
-    );
+    return res.status(503).json({ error: `Fleet unavailable. ${warnings.join(" ")}` });
   res.json({
     client: client.id,
     vehicles: [...combined.values()]
@@ -534,11 +590,14 @@ app.get("/api/fleet", async (req, res) => {
         a.name.localeCompare(b.name, undefined, { numeric: true }),
       ),
     warnings,
+    partial: warnings.length > 0,
+    connectionsLoaded: results.filter((r) => r.status === "fulfilled").length,
+    connectionsTotal: results.length,
     fetchedAt: new Date().toISOString(),
   });
 });
 app.get("/api/vehicle-detail", async (req, res) => {
-  const client = await getClient(req.query.client),
+  const client = await deadline(60000, null, "Google Master lookup", () => getClient(req.query.client)),
     id = clean(req.query.vehicle);
   if (!/^[\w:-]{1,120}$/.test(id))
     throw new Error("Invalid vehicle identifier.");
@@ -547,75 +606,82 @@ app.get("/api/vehicle-detail", async (req, res) => {
     let mpg = null,
       mpgSource = null,
       historyFuel = null;
-    for (const token of client.tokens) {
-      // Verify this token can see the requested vehicle before obtaining reports.
-      let fleet;
-      try {
-        fleet = await tokenFleet(token);
-      } catch {
-        continue;
-      }
-      const v = fleet.find((v) => v.id === id);
-      if (!v) continue;
-      const end = new Date(),
-        start = new Date(end.getTime() - 30 * 86400000);
-      try {
-        const reports = (
-          await samsaraPage(token, "/fleet/reports/vehicles/fuel-energy", {
-            vehicleIds: id,
-            startDate: start.toISOString(),
-            endDate: end.toISOString(),
-          })
-        ).rows;
-        const report = reports.find(
-          (r) => String(r.vehicle?.id || r.vehicleId) === id,
-        );
-        if (report) {
-          const miles = number(report.distanceTraveledMeters),
-            ml = number(report.fuelConsumedMl),
-            direct = number(report.efficiencyMpge);
-          mpg =
-            miles > 0 && ml > 0
-              ? miles / 1609.344 / (ml / 3785.411784)
-              : direct > 0
-                ? direct
-                : null;
-          if (mpg > 100 || mpg <= 0) mpg = null;
-          if (mpg) mpgSource = "Samsara · previous 30 days";
-        }
-      } catch {
-        warnings.push(
-          "Fuel-efficiency report unavailable. MPG stays manually editable.",
-        );
-      }
-      if (number(latest(v.stats.fuelPercents)?.value) === null) {
-        try {
-          const history = (
-            await samsaraPage(token, "/fleet/vehicles/stats/history", {
-              types: "fuelPercents",
-              vehicleIds: id,
-              startTime: new Date(end.getTime() - 7 * 86400000).toISOString(),
-              endTime: end.toISOString(),
-            })
-          ).rows;
-          for (const record of history) {
-            if (String(record.id) !== id) continue;
-            const value = latest(record.fuelPercents);
-            if (
-              value &&
-              number(value.value) !== null &&
-              (!historyFuel ||
-                Date.parse(value.time) > Date.parse(historyFuel.time))
-            )
-              historyFuel = { value: number(value.value), time: value.time };
+    try {
+      await deadline(45000, null, "Samsara vehicle details", async (signal) => {
+        for (const token of client.tokens) {
+          signal.throwIfAborted();
+          // Verify this token can see the requested vehicle before obtaining reports.
+          let fleet;
+          try {
+            fleet = await tokenFleet(token);
+          } catch {
+            continue;
           }
-        } catch {
-          warnings.push(
-            "Fuel history unavailable. Enter starting fuel manually.",
-          );
+          const v = fleet.vehicles.find((v) => v.id === id);
+          if (!v) continue;
+          const end = new Date(),
+            start = new Date(end.getTime() - 30 * 86400000);
+          try {
+            const reports = (
+              await samsaraPage(token, "/fleet/reports/vehicles/fuel-energy", {
+                vehicleIds: id,
+                startDate: start.toISOString(),
+                endDate: end.toISOString(),
+              }, signal)
+            ).rows;
+            const report = reports.find(
+              (r) => String(r.vehicle?.id || r.vehicleId) === id,
+            );
+            if (report) {
+              const miles = number(report.distanceTraveledMeters),
+                ml = number(report.fuelConsumedMl),
+                direct = number(report.efficiencyMpge);
+              mpg =
+                miles > 0 && ml > 0
+                  ? miles / 1609.344 / (ml / 3785.411784)
+                  : direct > 0
+                    ? direct
+                    : null;
+              if (mpg > 100 || mpg <= 0) mpg = null;
+              if (mpg) mpgSource = "Samsara · previous 30 days";
+            }
+          } catch {
+            warnings.push(
+              "Fuel-efficiency report unavailable. MPG stays manually editable.",
+            );
+          }
+          if (number(latest(v.stats.fuelPercents)?.value) === null) {
+            try {
+              const history = (
+                await samsaraPage(token, "/fleet/vehicles/stats/history", {
+                  types: "fuelPercents",
+                  vehicleIds: id,
+                  startTime: new Date(end.getTime() - 7 * 86400000).toISOString(),
+                  endTime: end.toISOString(),
+                }, signal)
+              ).rows;
+              for (const record of history) {
+                if (String(record.id) !== id) continue;
+                const value = latest(record.fuelPercents);
+                if (
+                  value &&
+                  number(value.value) !== null &&
+                  (!historyFuel ||
+                    Date.parse(value.time) > Date.parse(historyFuel.time))
+                )
+                  historyFuel = { value: number(value.value), time: value.time };
+              }
+            } catch {
+              warnings.push(
+                "Fuel history unavailable. Enter starting fuel manually.",
+              );
+            }
+          }
+          if (mpg !== null) break;
         }
-      }
-      if (mpg !== null) break;
+      });
+    } catch (error) {
+      warnings.push(error.message);
     }
     return { mpg, mpgSource, historyFuel, warnings };
   });

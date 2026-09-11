@@ -2,6 +2,22 @@
 
 Built for Div from the supplied FCO, PurFCO and Fuel Pump Viewer material.
 
+## Fleet timeout update
+
+For an existing Fuelio installation, extract **Fuelio-Fleet-Timeout-Fix.zip** and replace its four files (`server.js`, `workspace.js`, `tests.mjs`, `README.md`) at the root of the existing GitHub repository in one commit. Wait for the new Vercel production deployment to become Ready, then reload the production site with Ctrl+Shift+R. Keep the existing Google credential and all other deployment settings.
+
+This update addresses the unbounded fleet-loading path that could exceed the browser's three-minute wait and Vercel Hobby's five-minute function limit. It uses Samsara's current-value **snapshot** endpoint for the 60-second display refresh, instead of draining a statistics feed. GPS, fuel, odometers and engine state remain supported, with up to three types per request. Historical fuel and MPG reports remain available separately.
+
+Each Samsara fleet connection has a 45-second total deadline, including pagination and retries. Individual HTTP attempts allow 12 seconds, including response-body reading, and at most one retry for transient failures; each statistics group has a 25-second deadline. The preceding Master lookup is capped at 60 seconds. These application deadlines keep fleet responses within approximately 105 seconds even when multiple services stall; successful requests normally finish much sooner. They do not guarantee that an unavailable provider will supply data.
+
+The result includes healthy connections even when another fails. If vehicle inventory loads but some statistics fail, the truck list still appears, with available or previously measured values and their original timestamps. **Partial data** is labelled in the interface. If all connections fail, a readable 503 response identifies the connection and endpoint instead of waiting for a platform timeout. Endpoint/status warnings are also written to Vercel logs without API keys or vehicle locations.
+
+Overlapping refreshes for the same active client share one browser request. Optional selected-truck reports have their own total deadline and no longer hold up the truck list. Manual edits, fuel planning, Full/Half Tank rules, prices, map layers and themes are preserved.
+
+All 38 automated checks passed locally using Node.js 24.19. The deployment remains pinned to Node.js 22 by the unchanged package.json; the tests did not run on a live Vercel instance. Coverage includes stalled connections and response bodies, endless pagination, denied permissions, partial results, recovery and overlapping browser refreshes. Authenticated production Samsara calls cannot be verified from the local test environment; check the deployed result and Activity messages after updating.
+
+References: [Samsara snapshot use cases](https://developers.samsara.com/docs/telematics#snapshot), [Vercel function duration limits](https://vercel.com/docs/functions/configuring-functions/duration).
+
 Extract **FCO-Dispatch-Vercel-Hobby.zip** into one folder, preserving all filenames. Upload the extracted files themselves to the root of your GitHub repository. The ZIP contains the complete source project; Vercel installs its dependencies and builds its public assets automatically.
 
 ## Put it online with GitHub and Vercel

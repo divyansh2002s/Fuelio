@@ -561,7 +561,7 @@ test("Build output contains the app and excludes server code and credential inst
   );
 });
 
-test("DOM workflow: editable live values, manual overrides, themes, routes and verified plan messages", async () => {
+test("DOM workflow: editable live values, manual overrides, themes, routes and verified plan messages", async (t) => {
   const { JSDOM } = await import("jsdom");
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   const dom = new JSDOM(html, { url: "http://fco.test/" });
@@ -705,7 +705,7 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     ],
     "Test Master",
   );
-  let fuelPercent = 60;
+  let fuelPercent = 60, fleetBarrier = null, fleetCalls = 0, partialFleet = false;
   const response = (data) =>
     new Response(JSON.stringify(data), {
       headers: { "Content-Type": "application/json" },
@@ -726,7 +726,9 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
         truckRouting: false,
       });
     if (path === "/api/fuel") return response(fuel);
-    if (path.startsWith("/api/fleet"))
+    if (path.startsWith("/api/fleet")) {
+      fleetCalls++;
+      if (fleetBarrier) await fleetBarrier;
       return response({
         vehicles: [
           {
@@ -744,8 +746,10 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
             heading: 90,
           },
         ],
-        warnings: [],
+        warnings: partialFleet ? ["Connection 2: test timeout"] : [],
+        partial: partialFleet,
       });
+    }
     if (path.startsWith("/api/vehicle-detail"))
       return response({
         mpg: 7,
@@ -850,6 +854,35 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     el("results").querySelector("[data-plan-message]").click();
     assert.match(el("resultMessage").value, /full tank/);
     assert.equal(el("messageDialog").open, true);
+    await t.test("Manual and scheduled fleet refreshes share one pending request", async () => {
+      let release;
+      fleetBarrier = new Promise((resolve) => { release = resolve; });
+      partialFleet = true;
+      const before = fleetCalls;
+      const a = el("refreshFleet").onclick({ currentTarget: el("refreshFleet") });
+      const b = el("refreshFleet").onclick({ currentTarget: el("refreshFleet") });
+      const c = refresh();
+      await tick();
+      assert.equal(fleetCalls, before + 1);
+      release();
+      await Promise.all([a, b, c]);
+      fleetBarrier = null;
+      assert.match(el("connection").textContent, /partial data/);
+      assert.equal(el("connection").classList.contains("connected"), false);
+    });
+    await t.test("Registry refresh does not claim live data while a partial fleet refresh waits", async () => {
+      let release;
+      fleetBarrier = new Promise((resolve) => { release = resolve; });
+      const next = refresh();
+      await tick();
+      assert.match(el("connection").textContent, /partial data/);
+      partialFleet = false;
+      release();
+      await next;
+      fleetBarrier = null;
+      assert.match(el("connection").textContent, /live every 60 sec/);
+      assert.equal(el("connection").classList.contains("connected"), true);
+    });
     input("truck", "MANUAL");
     input("capacity", "300");
     assert.equal(el("capacity").value, "300");
@@ -887,7 +920,7 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
   }
 });
 
-test("Backend: private registry, multiple tokens, pagination, client isolation and history fallback", async () => {
+test("Backend: private registry, multiple tokens, pagination, client isolation and history fallback", async (t) => {
   const { generateKeyPairSync } = await import("node:crypto");
   const { once } = await import("node:events");
   const envKeys = [
@@ -913,7 +946,8 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
     originalNow = Date.now;
   let now = originalNow();
   Date.now = () => now;
-  let addClient = false;
+  let addClient = false, faultMode = "", aborts = 0, faultPages = 0;
+  const nativeSetTimeout = globalThis.setTimeout;
   const fakeKeys = [
     "TEST_ALPHA_ONE",
     "TEST_ALPHA_TWO",
@@ -1007,6 +1041,33 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
       assert.ok(!token.includes(","));
       const beta = token === fakeKeys[2],
         second = token === fakeKeys[1];
+      if (faultMode === "detail-pages" && u.pathname.includes("/fuel-energy")) {
+        await new Promise((resolve) => nativeSetTimeout(resolve, 10));
+        options.signal.throwIfAborted();
+        return json({ data: { vehicleReports: [] },
+          pagination: { hasNextPage: true, endCursor: `report-${++faultPages}` } });
+      }
+      if (faultMode === "unauthorized" && u.pathname === "/fleet/vehicles")
+        return new Response("denied", { status: 401 });
+      if (faultMode === "optional-denied" && u.pathname === "/fleet/vehicles/stats" && u.searchParams.get("types").includes("engineStates"))
+        return new Response("denied", { status: 403 });
+      if ((faultMode === "one-stall" && second && u.pathname === "/fleet/vehicles") ||
+          (faultMode === "stats-stall" && u.pathname === "/fleet/vehicles/stats")) {
+        return new Promise((resolve, reject) => {
+          options.signal.addEventListener("abort", () => { aborts++; reject(options.signal.reason); }, { once: true });
+        });
+      }
+      if (faultMode === "body-stall" && second && u.pathname === "/fleet/vehicles") {
+        return new Response(new ReadableStream({ start(controller) {
+          options.signal.addEventListener("abort", () => { aborts++; controller.error(options.signal.reason); }, { once: true });
+        } }));
+      }
+      if (faultMode === "pages-stall" && second && u.pathname === "/fleet/vehicles") {
+        await new Promise((resolve) => nativeSetTimeout(resolve, 10));
+        options.signal.throwIfAborted();
+        return json({ data: [{ id: `page-${faultPages}`, name: "TEST" }],
+          pagination: { hasNextPage: true, endCursor: `cursor-${++faultPages}` } });
+      }
       if (u.pathname === "/fleet/vehicles") {
         if (!u.searchParams.has("after"))
           return json({
@@ -1024,14 +1085,14 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
           pagination: { hasNextPage: false, endCursor: "done" },
         });
       }
-      if (u.pathname.includes("/stats/feed")) {
-        assert.ok(u.searchParams.get("types").split(",").length <= 4);
-        if (u.searchParams.get("types") === "engineStates")
+      if (u.pathname === "/fleet/vehicles/stats") {
+        assert.ok(u.searchParams.get("types").split(",").length <= 3);
+        if (u.searchParams.get("types").includes("engineStates"))
           return json({
             data: [
               {
                 id: "104",
-                engineStates: [{ value: "On", time: "2026-09-11T15:00:00Z" }],
+                engineStates: { value: "On", time: "2026-09-11T15:00:00Z" },
               },
             ],
             pagination: { hasNextPage: false, endCursor: "engine-cursor" },
@@ -1148,6 +1209,7 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
     close(av.fuelPercent, 75);
     close(av.speed, 0);
     close(av.odometer, 1000);
+    assert.equal(av.engine, "On");
     const beta = (await call("fleet?client=" + config.clients[1].id)).data;
     const bv = beta.vehicles.find((v) => v.id === "104");
     close(bv.lat, 40);
@@ -1171,11 +1233,59 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
     now += 61000;
     assert.equal((await call("config")).data.clients.length, 3);
     await call("fleet?client=" + config.clients[0].id);
-    assert.ok(requests.some((r) => r.url.includes("after=stats-cursor")));
+    assert.ok(requests.some((r) => new URL(r.url).pathname === "/fleet/vehicles/stats"));
+    assert.ok(!requests.some((r) => r.url.includes("/stats/feed")));
     assert.ok(requests.some((r) => r.url.includes("after=page2")));
     for (const key of fakeKeys)
       assert.ok(!JSON.stringify({ alpha, beta, detail }).includes(key));
+    // Accelerate only application deadlines/retry delays, leaving HTTP timers
+    // untouched. Faults still pass through the real HTTP route and abort logic.
+    globalThis.setTimeout = (fn, ms, ...args) => nativeSetTimeout(fn,
+      ms === 12000 ? 30 : ms === 25000 ? 100 : ms === 45000 ? 180 : ms === 500 ? 5 : ms, ...args);
+    for (const mode of ["one-stall", "body-stall", "pages-stall", "optional-denied", "stats-stall", "unauthorized"]) {
+      await t.test(`Fleet fault: ${mode} returns a bounded, truthful result`, async () => {
+        faultMode = mode; now += 700000; aborts = 0; faultPages = 0;
+        const began = performance.now();
+        const result = await call("fleet?client=" + config.clients[0].id);
+        assert.ok(performance.now() - began < 2000, "fleet must return before a browser/platform timeout");
+        assert.ok(!JSON.stringify(result).includes("TEST_ALPHA"));
+        if (mode === "unauthorized") {
+          assert.equal(result.status, 503);
+          assert.match(result.data.error, /Connection 1:.*HTTP 401/);
+          assert.match(result.data.error, /Connection 2:.*HTTP 401/);
+        } else {
+          assert.equal(result.status, 200);
+          assert.equal(result.data.partial, true);
+          assert.ok(result.data.warnings.length > 0);
+          assert.equal(result.data.vehicles.length, 2);
+          if (["one-stall", "body-stall", "pages-stall"].includes(mode)) {
+            assert.equal(result.data.connectionsLoaded, 1);
+            assert.equal(result.data.vehicles.find(v => v.id === "104").fuelPercent, 60);
+          } else assert.equal(result.data.connectionsLoaded, 2);
+          if (["one-stall", "body-stall", "stats-stall"].includes(mode)) assert.ok(aborts > 0);
+          if (mode === "optional-denied") assert.match(result.data.warnings.join(" "), /HTTP 403/);
+        }
+      });
+    }
+    await t.test("Optional vehicle reports stop at their total deadline and keep manual fallback available", async () => {
+      faultMode = "detail-pages"; now += 700000;
+      const began = performance.now();
+      const result = await call("vehicle-detail?client=" + config.clients[1].id + "&vehicle=104");
+      assert.ok(performance.now() - began < 2000);
+      assert.equal(result.status, 200);
+      assert.equal(result.data.mpg, null);
+      assert.match(result.data.warnings.join(" "), /timed out/);
+    });
+    faultMode = ""; now += 700000;
+    await t.test("Fleet recovers on the next refresh after upstream failure", async () => {
+      const result = await call("fleet?client=" + config.clients[0].id);
+      assert.equal(result.status, 200);
+      assert.equal(result.data.partial, false);
+      assert.equal(result.data.connectionsLoaded, 2);
+      assert.equal(result.data.warnings.length, 0);
+    });
   } finally {
+    globalThis.setTimeout = nativeSetTimeout;
     if (server) {
       server.closeAllConnections();
       await new Promise((resolve) => server.close(resolve));

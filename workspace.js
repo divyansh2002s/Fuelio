@@ -393,10 +393,13 @@ async function loadConfig(initial = false) {
     $("messageMaster").value = previous;
   $("settingsStatus").textContent =
     `${r.privateMaster ? "Private Master connected" : "Private Master is not connected"} · ${r.clients.length} clients · ${r.masters.length} fuel masters. ${r.truckRouting ? "Truck routing is configured." : "Standard routing is available."}`;
-  $("connection").textContent = state.client
-    ? "Live fleet · every 60 sec"
-    : "Manual mode";
-  $("connection").classList.toggle("connected", !!state.client);
+  if (!state.client) {
+    $("connection").textContent = "Manual mode";
+    $("connection").classList.remove("connected");
+  } else if (!state.vehicles.length) {
+    $("connection").textContent = "Connecting to fleet…";
+    $("connection").classList.remove("connected");
+  }
   if (initial) {
     if (r.errors.length) log(r.errors.join(" "));
     if (
@@ -431,11 +434,32 @@ function findTruck(value) {
   });
   return matches.length === 1 ? matches[0] : null;
 }
+let fleetJob = null;
 async function loadFleet() {
   if (!state.client) return;
+  if (fleetJob?.client === state.client && fleetJob.seq === state.fleetSeq) return fleetJob.promise;
   const client = state.client,
     seq = ++state.fleetSeq;
-  const result = await api(`fleet?client=${encodeURIComponent(client)}`);
+  const promise = updateFleet(client, seq);
+  const job = { client, seq, promise };
+  fleetJob = job;
+  try {
+    return await promise;
+  } finally {
+    if (fleetJob === job) fleetJob = null;
+  }
+}
+async function updateFleet(client, seq) {
+  let result;
+  try {
+    result = await api(`fleet?client=${encodeURIComponent(client)}`);
+  } catch (error) {
+    if (seq === state.fleetSeq && client === state.client) {
+      $("connection").textContent = "Fleet unavailable · last values retained";
+      $("connection").classList.remove("connected");
+    }
+    throw error;
+  }
   if (seq !== state.fleetSeq || client !== state.client) return;
   state.vehicles = result.vehicles;
   $("trucks").innerHTML = result.vehicles
@@ -456,16 +480,16 @@ async function loadFleet() {
       state.vehicle = v;
       $("truck").value = vehicleLabel(v);
       applyLive();
-      await loadVehicleDetail();
     }
   }
   $("connection").textContent =
-    `${result.vehicles.length} trucks · live every 60 sec`;
-  $("connection").classList.add("connected");
+    `${result.vehicles.length} trucks · ${result.partial ? "partial data · see Activity" : "live every 60 sec"}`;
+  $("connection").classList.toggle("connected", !result.partial);
   if (result.warnings.length) log(result.warnings.join(" "), "warning");
   drawTruck();
   if (state.view === "fleet") renderFleet();
-  if (state.vehicle) await loadVehicleDetail();
+  // Optional reports must not block the truck list or the next fleet refresh.
+  if (state.vehicle) void loadVehicleDetail().catch((error) => log(error.message, "warning"));
 }
 function applyLive(force = false) {
   const v = state.vehicle;
@@ -2413,6 +2437,7 @@ async function bootstrap() {
     $("settingsStatus").textContent = e.message;
     log(e.message, "warning");
     $("connection").textContent = "Manual mode · connection unavailable";
+    $("connection").classList.remove("connected");
   }
   let refreshing = false;
   const refresh = async () => {
@@ -2429,6 +2454,7 @@ async function bootstrap() {
     } catch (e) {
       $("connection").textContent =
         "Last values retained · refresh unavailable";
+      $("connection").classList.remove("connected");
       log(e.message, "warning");
     } finally {
       refreshing = false;
