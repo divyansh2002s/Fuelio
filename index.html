@@ -1,0 +1,732 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>FCO — Dispatch workspace</title>
+    <meta
+      name="description"
+      content="Live fleet information, route comparisons and fuel planning in one dispatch workspace."
+    />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231e4ed8'/%3E%3Cpath d='M9 24V8h14M9 15h11' fill='none' stroke='white' stroke-width='4'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/vendor/leaflet/leaflet.css" />
+    <link rel="stylesheet" href="/vendor/maplibre-gl.css" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/vendor/leaflet/leaflet.js" defer></script>
+    <script src="/vendor/maplibre-gl.js" defer></script>
+    <script src="/vendor/leaflet-maplibre-gl.js" defer></script>
+    <script type="module" src="/workspace.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="#planner" aria-label="FCO planner"
+        ><span class="brand-symbol">F</span
+        ><strong>FCO<span>DISPATCH WORKSPACE</span></strong></a
+      >
+      <nav aria-label="Workspace">
+        <button class="nav active" data-view="planner">Plan trip</button
+        ><button class="nav" data-view="fleet">Fleet</button
+        ><button class="nav" data-view="pumps">Fuel pumps</button
+        ><button class="nav" data-view="library">Routes &amp; loads</button
+        ><button class="nav" data-view="messages">Messages</button
+        ><button class="nav" data-view="activity">Activity</button>
+      </nav>
+      <div class="top-actions">
+        <label class="sr-only" for="theme">Colour theme</label
+        ><select id="theme" aria-label="Colour theme">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="crimson">Crimson</option>
+          <option value="icy">Icy</option></select
+        ><button
+          id="settingsBtn"
+          class="icon-btn"
+          title="Connections and preferences"
+          aria-label="Open settings"
+        >
+          ⚙
+        </button>
+      </div>
+    </header>
+    <div class="sourcebar">
+      <div class="source-control">
+        <label for="client">Client</label
+        ><select id="client">
+          <option value="">Manual planning</option>
+        </select>
+      </div>
+      <div class="source-control master-control">
+        <label for="master">Fuel master</label
+        ><select id="master">
+          <option value="">Choose a source</option>
+        </select>
+      </div>
+      <button id="loadFuel" class="quiet">Load prices</button
+      ><button id="sourceBtn" class="quiet">Sheet / file</button>
+      <span id="sourceBadge" class="source-badge">No fuel source loaded</span>
+      <span id="connection" class="connection">Manual mode</span>
+    </div>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <main id="workspace" class="workspace" data-view="planner">
+      <aside id="tripPanel" class="trip-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">TRIP DETAILS</p>
+            <h1>Where are we going?</h1>
+          </div>
+          <button id="resetTrip" class="text-button">Clear</button>
+        </div>
+        <label for="truck"
+          >Truck <span class="optional">or enter a unit manually</span></label
+        >
+        <div class="inline">
+          <input
+            id="truck"
+            list="trucks"
+            placeholder="Search truck number"
+            autocomplete="off"
+          /><datalist id="trucks"></datalist
+          ><button
+            id="useLive"
+            class="small-btn"
+            title="Replace manual overrides with current telemetry"
+          >
+            Use live
+          </button>
+        </div>
+        <details id="telemetryDetails" class="telemetry" open>
+          <summary>
+            <span id="telemetryTitle">Live information</span
+            ><span id="liveTime">Waiting for a truck</span>
+          </summary>
+          <div id="telemetryBody" class="muted">
+            Choose a connected truck or enter the trip values below.
+          </div>
+        </details>
+        <div class="route-inputs">
+          <div class="route-field">
+            <span class="route-dot origin-dot"></span>
+            <div>
+              <label for="origin">Origin</label>
+              <div class="location-wrap">
+                <input
+                  id="origin"
+                  placeholder="City, state or latitude, longitude"
+                  autocomplete="off"
+                /><button
+                  class="search-place"
+                  data-field="origin"
+                  aria-label="Search origin"
+                >
+                  ⌕
+                </button>
+              </div>
+              <div id="originSuggestions" class="suggestions" hidden></div>
+            </div>
+          </div>
+          <div class="route-field">
+            <span class="route-dot destination-dot"></span>
+            <div>
+              <label for="destination">Destination</label>
+              <div class="location-wrap">
+                <input
+                  id="destination"
+                  placeholder="Where is the truck headed?"
+                  autocomplete="off"
+                /><button
+                  class="search-place"
+                  data-field="destination"
+                  aria-label="Search destination"
+                >
+                  ⌕
+                </button>
+              </div>
+              <div id="destinationSuggestions" class="suggestions" hidden></div>
+            </div>
+          </div>
+        </div>
+        <details class="waypoint-details">
+          <summary>
+            Waypoints &amp; map selection <span id="waypointCount"></span>
+          </summary>
+          <label for="waypoints">Waypoints, one per line</label
+          ><textarea
+            id="waypoints"
+            rows="3"
+            placeholder="Flagstaff, AZ&#10;Albuquerque, NM"
+          ></textarea
+          ><label for="mapClick">Set by clicking the map</label
+          ><select id="mapClick">
+            <option value="none">Map selection off</option>
+            <option value="origin">Origin</option>
+            <option value="destination">Destination</option>
+            <option value="waypoint">Add waypoint</option>
+          </select>
+        </details>
+        <div class="section-divider"></div>
+        <div class="section-heading">
+          <h2>Fuel &amp; range</h2>
+          <span id="overrideBadge" class="small muted"></span>
+        </div>
+        <div class="field-grid">
+          <div>
+            <label for="capacity">Tank capacity <em>gal</em></label
+            ><input id="capacity" type="number" min="1" step="1" value="240" />
+          </div>
+          <div>
+            <label for="mpg">Fuel economy <em>MPG</em></label
+            ><input id="mpg" type="number" min="0.1" step="0.01" value="7" />
+          </div>
+          <div>
+            <label for="startFuel">Starting fuel <em>gal</em></label
+            ><input
+              id="startFuel"
+              type="number"
+              min="0"
+              step="0.01"
+              value="100"
+            />
+          </div>
+          <div>
+            <label for="fuelPercent">Starting fuel <em>%</em></label
+            ><input
+              id="fuelPercent"
+              type="number"
+              min="0"
+              max="100"
+              step="0.01"
+              value="41.67"
+            />
+          </div>
+        </div>
+        <label for="fill">At each fuel stop</label
+        ><select id="fill">
+          <option value="full">Full Tank — leave at 100%</option>
+          <option value="half">Half Tank — leave at 50%</option>
+        </select>
+        <p id="fillHelp" class="field-help">
+          Leave each selected stop with 240 gallons.
+        </p>
+        <div class="field-grid">
+          <div>
+            <label for="reserve">Buffer fuel <em>gal</em></label
+            ><input id="reserve" type="number" min="0" step="1" value="50" />
+          </div>
+          <div>
+            <label for="endFuel">Ending fuel target <em>gal</em></label
+            ><input id="endFuel" type="number" min="0" step="1" value="50" />
+          </div>
+        </div>
+        <p id="rangeHelp" class="field-help"></p>
+        <details class="rules-details">
+          <summary>Planning rules</summary>
+          <label for="mode">Refuelling rule</label
+          ><select id="mode">
+            <option value="buffer">Plain Buffer — lowest fuel cost</option>
+            <option value="strict">Strict arrival window</option>
+            <option value="before_ca">Before entering California</option>
+          </select>
+          <p id="modeHelp" class="field-help"></p>
+          <div class="field-grid">
+            <div>
+              <label for="maxStops">Maximum stops</label
+              ><input
+                id="maxStops"
+                type="number"
+                value="6"
+                min="0"
+                max="1000"
+                step="1"
+              />
+            </div>
+            <div>
+              <label for="corridor">Route radius <em>mi</em></label
+              ><input
+                id="corridor"
+                type="number"
+                value="1"
+                min="0.05"
+                max="10"
+                step="0.1"
+              />
+            </div>
+            <div>
+              <label for="windowLower">Window below buffer <em>gal</em></label
+              ><input id="windowLower" type="number" value="10" min="0" />
+            </div>
+            <div>
+              <label for="windowUpper">Window above buffer <em>gal</em></label
+              ><input id="windowUpper" type="number" value="5" min="0" />
+            </div>
+            <div>
+              <label for="endTolerance">End-target tolerance <em>gal</em></label
+              ><input
+                id="endTolerance"
+                type="number"
+                min="0"
+                placeholder="No upper limit"
+              />
+            </div>
+          </div>
+          <label class="check"
+            ><input id="rescue" type="checkbox" />Offer upper-window rescue if
+            needed</label
+          >
+          <p class="field-help">
+            Rescue keeps the minimum buffer and all other limits.
+          </p>
+        </details>
+        <div class="trip-actions">
+          <button id="findRoutes" class="primary">
+            Find routes <span>→</span></button
+          ><button id="saveRoute" class="secondary">Save trip</button>
+        </div>
+      </aside>
+      <section class="canvas-panel">
+        <div id="mapShell" class="map-shell">
+          <div class="map-toolbar">
+            <div class="segmented">
+              <button class="active" id="streetBtn">Map</button
+              ><button id="satelliteBtn">Satellite</button>
+            </div>
+            <div class="map-tools">
+              <button id="heatBtn" aria-pressed="false">Price heat</button
+              ><button id="fitBtn">Fit view</button
+              ><button id="fullscreenBtn" aria-label="Toggle full-screen map">
+                ⛶
+              </button>
+            </div>
+          </div>
+          <div id="map" aria-label="Route and fuel pump map"></div>
+          <div id="mapCaption" class="map-caption">
+            Route first. Fuel stops next.
+          </div>
+          <div id="priceLegend" class="price-legend" hidden></div>
+        </div>
+        <div id="plannerContent">
+          <div class="section-heading result-heading">
+            <div>
+              <p class="eyebrow">ROUTE COMPARISON</p>
+              <h2>Choose the roads. Compare the fuel.</h2>
+            </div>
+            <span id="routeCount" class="muted small">No routes yet</span>
+          </div>
+          <div id="routeCards" class="route-cards">
+            <div class="empty-state">
+              <span class="empty-mark">↗</span>
+              <div>
+                <h3>Your next trip starts here</h3>
+                <p>
+                  Enter the origin and destination, then find routes. Fuel
+                  prices can come from a master, a Google Sheet or a CSV.
+                </p>
+              </div>
+            </div>
+          </div>
+          <div id="solveBar" class="solve-bar" hidden>
+            <span id="candidateSummary" class="muted"></span
+            ><button id="solveRoutes" class="primary">
+              Find cheapest fuel plan
+            </button>
+          </div>
+          <div id="progress" class="progress-panel" role="status" hidden>
+            <div>
+              <strong id="progressText">Preparing route…</strong
+              ><button id="cancelSolve" class="text-button">Cancel</button>
+            </div>
+            <progress id="progressValue" max="100" value="0"></progress>
+          </div>
+          <div id="results" aria-live="polite"></div>
+        </div>
+        <section id="fleetContent" class="page-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">LIVE FLEET</p>
+              <h1>Your trucks, at a glance</h1>
+            </div>
+            <button id="refreshFleet" class="secondary">Refresh now</button>
+          </div>
+          <div class="filterbar">
+            <input
+              id="fleetSearch"
+              placeholder="Search truck, VIN or location"
+              aria-label="Search fleet"
+            />
+          </div>
+          <p id="fleetCount" class="muted">
+            Select a client to load its trucks.
+          </p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Truck</th>
+                  <th>Last location</th>
+                  <th>Fuel</th>
+                  <th>Speed</th>
+                  <th>Odometer</th>
+                  <th>GPS measured</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="fleetRows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="pumpContent" class="page-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">FUEL PUMPS</p>
+              <h1>Know your options</h1>
+            </div>
+            <div>
+              <button id="fuelExport" class="secondary">Export CSV</button
+              ><a href="/fuel-template.csv" download class="button secondary"
+                >Template</a
+              >
+            </div>
+          </div>
+          <div class="filterbar">
+            <input
+              id="pumpSearch"
+              placeholder="Search pump, city, state, highway or exit"
+              aria-label="Search fuel pumps"
+            /><select id="stateFilter" aria-label="Filter by state">
+              <option value="">All states</option></select
+            ><select id="priceSort" aria-label="Sort pumps">
+              <option value="master">Master order</option>
+              <option value="low">Lowest price</option>
+              <option value="high">Highest price</option></select
+            ><label class="check"
+              ><input id="routeOnly" type="checkbox" />Selected routes
+              only</label
+            >
+          </div>
+          <details class="highway-filter">
+            <summary>Highway filter <span id="highwayCount"></span></summary>
+            <input
+              id="highwaySearch"
+              placeholder="Find a highway"
+              aria-label="Find highway"
+            />
+            <div id="highwayOptions" class="highway-options"></div>
+            <button id="clearHighways" class="text-button">
+              Clear highways
+            </button>
+          </details>
+          <p id="pumpCount" class="muted"></p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pump</th>
+                  <th>City / state</th>
+                  <th>Highway / exit</th>
+                  <th>Price / gal</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody id="pumpRows"></tbody>
+            </table>
+          </div>
+          <details>
+            <summary id="dataIssueCount">Data checks</summary>
+            <div id="dataIssues" class="small muted"></div>
+          </details>
+        </section>
+        <section id="libraryContent" class="page-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ROUTES &amp; LOADS</p>
+              <h1>Keep your regular lanes close</h1>
+            </div>
+            <button id="exportLibrary" class="secondary">
+              Export saved routes
+            </button>
+          </div>
+          <div id="savedRoutes" class="library-grid"></div>
+          <div class="section-divider"></div>
+          <h2>Historical loads</h2>
+          <p class="muted">
+            Import pickup and delivery coordinates, group nearby cities, and
+            match loads to saved lanes. Review a load or optimise eligible loads
+            in sequence.
+          </p>
+          <div class="filterbar">
+            <label class="button secondary"
+              >Import loads<input
+                id="loadUpload"
+                type="file"
+                accept=".csv,.tsv,.xlsx"
+                hidden /></label
+            ><a class="button quiet" href="/load-template.csv" download
+              >Load template</a
+            ><label
+              >City cluster radius
+              <input
+                id="clusterRadius"
+                type="number"
+                min="0.1"
+                value="50"
+                aria-label="City cluster radius in miles" /></label
+            ><button id="prepareLoads" class="secondary">
+              Prepare &amp; match</button
+            ><button id="runBatch" class="primary">Plan eligible loads</button
+            ><button id="exportLoads" class="secondary">Export results</button>
+          </div>
+          <p id="batchStatus" class="muted">No historical loads imported.</p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Load</th>
+                  <th>Pickup → delivery</th>
+                  <th>Lane match</th>
+                  <th>Status / fuel cost</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="loadRows"></tbody>
+            </table>
+          </div>
+        </section>
+        <section id="messageContent" class="page-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">DRIVER MESSAGES</p>
+              <h1>Clear stops. Ready to copy.</h1>
+            </div>
+            <button id="clearMessage" class="text-button">Clear</button>
+          </div>
+          <div class="field-grid">
+            <div>
+              <label for="messageDriver">Driver</label
+              ><input id="messageDriver" placeholder="Driver name" />
+            </div>
+            <div>
+              <label for="messagePartner">Team driver</label
+              ><input id="messagePartner" placeholder="Optional" />
+            </div>
+          </div>
+          <label for="messageRoute">Route</label
+          ><input id="messageRoute" placeholder="Origin → destination" /><label
+            for="messageMaster"
+            >Message master</label
+          >
+          <div class="inline">
+            <select id="messageMaster">
+              <option value="">Use loaded fuel pumps</option></select
+            ><button id="loadMessageMaster" class="secondary">Load</button
+            ><label class="button secondary"
+              >CSV<input
+                type="file"
+                id="messageUpload"
+                accept=".csv,.tsv,.xlsx"
+                hidden /></label
+            ><button id="messageSheetBtn" class="quiet">Google Sheet</button>
+          </div>
+          <p id="messageSource" class="source-badge">Loaded fuel pumps</p>
+          <div id="messagePairs"></div>
+          <button id="addPair" class="secondary">
+            + Add fuel stop / alternative</button
+          ><label for="messageInstruction">Filling instruction</label
+          ><input
+            id="messageInstruction"
+            value="Please follow the planned fuel quantities."
+          />
+          <div class="section-heading">
+            <h2>Preview</h2>
+            <button id="copyCustomMessage" class="primary">Copy message</button>
+          </div>
+          <textarea
+            id="messagePreview"
+            class="message-preview"
+            rows="10"
+            readonly
+          ></textarea>
+          <div id="partnerPreview"></div>
+        </section>
+        <section id="activityContent" class="page-panel" hidden>
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">ACTIVITY</p>
+              <h1>Dispatch log</h1>
+            </div>
+            <button id="clearLog" class="text-button">Clear log</button>
+          </div>
+          <div id="activityLog"></div>
+          <h2>Saved plans</h2>
+          <p class="muted">
+            Snapshots saved in this browser. Opening a saved plan does not fetch
+            new prices.
+          </p>
+          <div id="historyPlans"></div>
+        </section>
+      </section>
+    </main>
+    <dialog id="sourceDialog">
+      <form method="dialog" class="dialog-heading">
+        <h2>Fuel data source</h2>
+        <button class="icon-btn" aria-label="Close">×</button>
+      </form>
+      <p class="muted">
+        A successful load becomes your active source. Its name is shown on every
+        result.
+      </p>
+      <label for="sheetUrl">Google Sheet URL</label
+      ><input
+        id="sheetUrl"
+        placeholder="https://docs.google.com/spreadsheets/d/…"
+      /><label for="sheetGid"
+        >Tab GID
+        <span class="optional">optional if present in the URL</span></label
+      ><input id="sheetGid" placeholder="0" /><button
+        id="loadCustomSheet"
+        class="primary"
+      >
+        Load Google Sheet
+      </button>
+      <div class="section-divider"></div>
+      <label class="button secondary"
+        >Upload fuel file<input
+          id="fuelUpload"
+          type="file"
+          accept=".csv,.tsv,.xlsx"
+          hidden /></label
+      ><a class="button quiet" href="/fuel-template.csv" download
+        >Download template</a
+      >
+      <p class="field-help">
+        Required: pump_name, price_per_gallon, latitude, longitude. City, state,
+        brand, store_number, highway and exit are supported.
+      </p>
+      <p id="sourceError" class="error" role="alert"></p>
+    </dialog>
+    <dialog id="settingsDialog">
+      <form method="dialog" class="dialog-heading">
+        <h2>Connections &amp; preferences</h2>
+        <button class="icon-btn" aria-label="Close">×</button>
+      </form>
+      <div id="settingsStatus" class="callout"></div>
+      <h3>Routing</h3>
+      <label for="routingProfile">Road profile</label
+      ><select id="routingProfile">
+        <option value="driving">Standard road routing</option>
+        <option value="hgv">Truck routing — requires configured ORS key</option>
+      </select>
+      <p class="field-help">
+        Standard routing does not check truck height, weight or hazardous-goods
+        restrictions. Truck routing uses the dimensions below. Alternative
+        availability depends on the routing service.
+      </p>
+      <div class="field-grid">
+        <div>
+          <label for="truckHeight">Height <em>metres</em></label
+          ><input
+            id="truckHeight"
+            type="number"
+            value="4.1"
+            min="0"
+            step="0.1"
+          />
+        </div>
+        <div>
+          <label for="truckWeight">Gross weight <em>tonnes</em></label
+          ><input
+            id="truckWeight"
+            type="number"
+            value="36"
+            min="0"
+            step="0.1"
+          />
+        </div>
+        <div>
+          <label for="truckWidth">Width <em>metres</em></label
+          ><input
+            id="truckWidth"
+            type="number"
+            value="2.6"
+            min="0"
+            step="0.1"
+          />
+        </div>
+        <div>
+          <label for="truckLength">Length <em>metres</em></label
+          ><input
+            id="truckLength"
+            type="number"
+            value="22"
+            min="0"
+            step="0.1"
+          />
+        </div>
+      </div>
+      <label class="check"
+        ><input id="hazmat" type="checkbox" />Hazardous goods</label
+      ><label class="check"
+        ><input id="avoidTolls" type="checkbox" />Avoid tolls (truck
+        routing)</label
+      >
+      <h3>Local preferences</h3>
+      <p class="field-help">
+        Trip inputs, overrides, CSV data, saved routes, plans and theme
+        preferences are remembered in this browser. API keys are configured on
+        the server.
+      </p>
+      <button id="exportBackup" class="secondary">
+        Export workspace backup</button
+      ><label class="button secondary"
+        >Restore backup<input
+          id="restoreBackup"
+          type="file"
+          accept=".json"
+          hidden /></label
+      ><button id="refreshConfig" class="quiet">Reload master registry</button>
+    </dialog>
+    <dialog id="messageDialog">
+      <form method="dialog" class="dialog-heading">
+        <h2>Driver message</h2>
+        <button class="icon-btn" aria-label="Close">×</button>
+      </form>
+      <div class="field-grid">
+        <div>
+          <label for="resultDriver">Driver</label
+          ><input id="resultDriver" placeholder="Optional" />
+        </div>
+        <div>
+          <label for="resultPartner">Team driver</label
+          ><input id="resultPartner" placeholder="Optional" />
+        </div>
+      </div>
+      <textarea
+        id="resultMessage"
+        rows="13"
+        class="message-preview"
+        readonly
+      ></textarea
+      ><button id="copyResultMessage" class="primary">Copy message</button>
+    </dialog>
+    <dialog id="workbookDialog">
+      <form method="dialog" class="dialog-heading">
+        <h2>Choose a worksheet</h2>
+        <button value="cancel" class="icon-btn" aria-label="Cancel">×</button>
+      </form>
+      <label for="workbookSheet">Worksheet</label
+      ><select id="workbookSheet"></select
+      ><button id="workbookUse" class="primary">Use this worksheet</button>
+      <p class="field-help">
+        Values are read from the selected worksheet. Save your workbook in Excel
+        first so formula results are available.
+      </p>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <noscript
+      >This tool needs JavaScript enabled to display maps and calculate fuel
+      plans.</noscript
+    >
+  </body>
+</html>

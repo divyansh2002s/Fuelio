@@ -1,0 +1,252 @@
+[
+  {
+    "id": "pur-1",
+    "name": "Fresno to Cheshire via Tulsa",
+    "origin": "Fresno, CA",
+    "destination": "Cheshire, CT",
+    "waypoints": ["Tulsa, OK"],
+    "points": [
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      },
+      {
+        "label": "Tulsa, OK",
+        "lat": 36.1539,
+        "lng": -95.9928
+      },
+      {
+        "label": "Cheshire, CT",
+        "lat": 41.5084,
+        "lng": -72.9106
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-2",
+    "name": "Cheshire to Fresno via Tulsa",
+    "origin": "Cheshire, CT",
+    "destination": "Fresno, CA",
+    "waypoints": ["Tulsa, OK"],
+    "points": [
+      {
+        "label": "Cheshire, CT",
+        "lat": 41.5084,
+        "lng": -72.9106
+      },
+      {
+        "label": "Tulsa, OK",
+        "lat": 36.1539,
+        "lng": -95.9928
+      },
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-3",
+    "name": "Fresno to Baltimore, MD",
+    "origin": "Fresno, CA",
+    "destination": "Baltimore, MD",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      },
+      {
+        "label": "Baltimore, MD",
+        "lat": 39.0458,
+        "lng": -76.6413
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-4",
+    "name": "Baltimore, MD to Fresno",
+    "origin": "Baltimore, MD",
+    "destination": "Fresno, CA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Baltimore, MD",
+        "lat": 39.0458,
+        "lng": -76.6413
+      },
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-5",
+    "name": "Fresno to Chicago",
+    "origin": "Fresno, CA",
+    "destination": "Chicago, IL",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      },
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-6",
+    "name": "Chicago to Fresno",
+    "origin": "Chicago, IL",
+    "destination": "Fresno, CA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      },
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-7",
+    "name": "Sacramento to Chicago",
+    "origin": "Sacramento, CA",
+    "destination": "Chicago, IL",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Sacramento, CA",
+        "lat": 38.5816,
+        "lng": -121.4944
+      },
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-8",
+    "name": "Chicago to Sacramento",
+    "origin": "Chicago, IL",
+    "destination": "Sacramento, CA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      },
+      {
+        "label": "Sacramento, CA",
+        "lat": 38.5816,
+        "lng": -121.4944
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-9",
+    "name": "LA to Chicago",
+    "origin": "Los Angeles, CA",
+    "destination": "Chicago, IL",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Los Angeles, CA",
+        "lat": 34.0522,
+        "lng": -118.2437
+      },
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-10",
+    "name": "Chicago to LA",
+    "origin": "Chicago, IL",
+    "destination": "Los Angeles, CA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Chicago, IL",
+        "lat": 41.8781,
+        "lng": -87.6298
+      },
+      {
+        "label": "Los Angeles, CA",
+        "lat": 34.0522,
+        "lng": -118.2437
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-11",
+    "name": "Fresno to Atlanta",
+    "origin": "Fresno, CA",
+    "destination": "Atlanta, GA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      },
+      {
+        "label": "Atlanta, GA",
+        "lat": 33.749,
+        "lng": -84.388
+      }
+    ],
+    "source": "PurFCO route library"
+  },
+  {
+    "id": "pur-12",
+    "name": "Atlanta to Fresno",
+    "origin": "Atlanta, GA",
+    "destination": "Fresno, CA",
+    "waypoints": [],
+    "points": [
+      {
+        "label": "Atlanta, GA",
+        "lat": 33.749,
+        "lng": -84.388
+      },
+      {
+        "label": "Fresno, CA",
+        "lat": 36.7378,
+        "lng": -119.7871
+      }
+    ],
+    "source": "PurFCO route library"
+  }
+]

@@ -1,0 +1,26 @@
+{
+  "name": "fco-dispatch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "FCO dispatch workspace: exact fixed-fill fuel optimisation, fleet telemetry and fuel masters",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "build": "node build.js",
+    "start": "node --env-file-if-exists=.env server.js",
+    "test": "node --test tests.mjs"
+  },
+  "dependencies": {
+    "@maplibre/maplibre-gl-leaflet": "0.0.22",
+    "exceljs": "^4.4.0",
+    "express": "5.1.0",
+    "leaflet": "1.9.4",
+    "maplibre-gl": "4.7.1"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0"
+  },
+  "main": "server.js"
+}

@@ -1,0 +1,95 @@
+FCO — Vercel environment variables
+
+Set these in Vercel → Project → Settings → Environment Variables.
+Choose Production, save, then redeploy. Values are server-side: do not use a
+NEXT_PUBLIC_ or VITE_ prefix, and do not upload secret values to GitHub.
+
+RECOMMENDED MASTER WORKBOOK SETUP
+
+GOOGLE_SERVICE_ACCOUNT_JSON
+  Value: the complete JSON content of your Google service-account key file.
+  Paste the JSON object as-is, including its escaped private_key newlines.
+  Do not add extra surrounding quotes in Vercel.
+  Enable Google Sheets API and share every required workbook with the
+  service account's client_email as Viewer. Keep the Master Restricted.
+
+MASTER_SHEET_ID
+  Value: the part between /d/ and /edit in your Master workbook URL.
+  Default: 1VpTN7OY40d1yVFLvtBu2otIbUjAjqm6DVy71FDsBeeY
+  Tabs are selected by GID; their displayed names can be changed.
+  Fuel registry: 0. Driver-message registry: 970811620.
+  Samsara client registry: 1100093231.
+  Samsara keys belong in the PRIVATE FCO Samsara API tab, never client code.
+  Rotate any real token previously exposed through a publicly shared sheet.
+
+OPTIONAL TRUCK ROUTING
+
+ORS_API_KEY
+  Your openrouteservice key. Enables the Truck routing setting.
+  No key is supplied. Hosted API usage limits still apply.
+
+OPTIONAL ALTERNATIVE CONNECTION SETUP
+
+SAMSARA_TOKEN
+  Optional direct server token fallback if no clients are found in Master.
+  Separate multiple tokens with commas or actual newlines.
+  Normally leave unset and manage clients in your private Master workbook.
+
+SAMSARA_CLIENT_NAME
+  Display name for the direct-token fallback. Default: Connected fleet.
+
+OPTIONAL PROVIDER SETTINGS
+
+OSRM_URL
+  Base URL of an OSRM-compatible provider, without /route/v1/driving.
+  Default: https://router.project-osrm.org
+  Used for ordinary road routes and directional road-distance matrices.
+
+NOMINATIM_URL
+  Base URL of a Nominatim-compatible geocoder, without /search.
+  Default: https://nominatim.openstreetmap.org
+  Address search is submitted explicitly and restricted to the US.
+
+GEOCODER_USER_AGENT
+  Identifying application/contact string for your geocoder requests.
+  Suggested format: FCO-Dispatch/1.0 (your deployment URL; contact email)
+  Replace those descriptive placeholders with your actual details.
+
+ORS_URL
+  Optional compatible openrouteservice base URL.
+  Default: https://api.openrouteservice.org
+
+MASTER TAB IDS — ALREADY CONFIGURED; CHANGE ONLY IF YOUR TABS CHANGE
+
+FUEL_REGISTRY_GID
+  Numeric GID of the Fuel Stops registry in MASTER_SHEET_ID.
+  Default: 0
+
+MESSAGE_REGISTRY_GID
+  Numeric GID of the Driver Message Masters registry in MASTER_SHEET_ID.
+  Default: 970811620
+
+SAMSARA_REGISTRY_GID
+  Numeric GID of the Samsara client/API registry in MASTER_SHEET_ID.
+  Default: 1100093231
+  This tab is read only through the private Google service-account connection.
+
+These three variables are optional: your exact GIDs are the code defaults.
+The Fuel and Message registry rows supply the separate linked data workbook
+URLs and GIDs. Their GIDs are read from those rows, not replaced by these values.
+
+Without a Google credential, public fuel/message Sheets or CSV/XLSX imports
+can be used. Samsara tokens are never fetched through a public sheet export.
+Do not make a workbook containing API tokens public to enable this fallback.
+
+LOCAL RUNNING
+
+PORT
+  Optional local server port. Default: 3000. No Vercel setting is needed.
+
+For local .env files, use NAME=value lines. Put a compact JSON credential in
+single quotes on one line, keeping the JSON's literal \n escape sequences.
+Do not include a real credential in a downloadable sample or committed file.
+
+No database URL, Google Maps key, Python environment or paid solver licence
+is required. The site's deliberate shared-link access has no application login.
