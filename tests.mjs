@@ -23,6 +23,88 @@ import { clusterCities, prepareLoads, parseLoads } from "./batch.js";
 import { activeVehicles, searchStops, stopMapRows, stopNumber, mergeVehicleDetail, headingDegrees, routeHighways } from "./view-model.js";
 import { resolveMessageStop, MessageEditor } from "./message-editor.js";
 import { bindPlaceSearch } from "./place-search.js";
+import { makeHybridStyle, HybridReference } from "./hybrid-map.js";
+
+const hybridFixture = () => ({
+  version: 8, sources: { streets: { type: "vector", url: "https://example.invalid/tiles" }, photo: { type: "raster", tiles: ["https://example.invalid/photo"] } },
+  layers: [
+    { id: "background", type: "background", paint: { "background-color": "#fff" } },
+    { id: "imagery", type: "raster", source: "photo" },
+    { id: "land", type: "fill", source: "streets", "source-layer": "landcover" },
+    { id: "road_motorway", type: "line", source: "streets", "source-layer": "transportation", paint: { "line-width": 2 } },
+    { id: "road_minor", type: "line", source: "streets", "source-layer": "transportation", minzoom: 13 },
+    { id: "highway-shield-us-interstate", type: "symbol", source: "streets", "source-layer": "transportation_name", layout: { "text-field": ["get", "ref"] } },
+    { id: "label_city", type: "symbol", source: "streets", "source-layer": "place", layout: { "text-field": ["get", "name"], "icon-image": "town" } },
+  ],
+});
+
+test("Hybrid references preserve imagery transparency and readable roads, places and US route numbers", () => {
+  const input = hybridFixture(), before = JSON.stringify(input), style = makeHybridStyle(input);
+  assert.equal(JSON.stringify(input), before);
+  assert.ok(style.layers.every((l) => ["line", "symbol"].includes(l.type)));
+  assert.equal(style.sources.photo, undefined);
+  const city = style.layers.find((l) => l.id === "label_city");
+  assert.equal(city.paint["text-color"], "#ffffff");
+  assert.equal(city.paint["text-halo-color"], "#142331");
+  assert.equal(city.layout["icon-optional"], true);
+  const refs = style.layers.find((l) => l.id === "fuelio-highway-references");
+  assert.match(JSON.stringify(refs.layout["text-field"]), /I-.*us-highway.*US-.*us-state.*SR-/);
+  assert.equal(refs.layout["icon-image"], undefined, "Highway labels survive missing sprites");
+  assert.ok(style.layers.some((l) => l.id === "road_minor" && l.minzoom === 13));
+  assert.throws(() => makeHybridStyle({}), /unavailable/);
+});
+
+function hybridHarness(vector = true) {
+  const active = new Set(), panes = {}, vectors = [];
+  const map = { getPane: (name) => panes[name], createPane: (name) => panes[name] = { style: {} }, hasLayer: (layer) => active.has(layer), removeLayer: (layer) => active.delete(layer) };
+  const L = { tileLayer: (url, options) => ({ url, options, addTo() { active.add(this); return this; } }) };
+  if (vector) L.maplibreGL = (options) => {
+    const events = {}, gl = { on: (name, fn) => events[name] = fn, isStyleLoaded: () => true, queryRenderedFeatures: () => [{ layer: "city" }] };
+    const layer = { options, events, addTo() { active.add(this); return this; }, getMaplibreMap: () => gl };
+    vectors.push(layer); return layer;
+  };
+  return { active, panes, vectors, map, L };
+}
+
+test("Hybrid mode switches discard late loads and keep every reference below fuel-stop markers", async () => {
+  const originalFetch = globalThis.fetch, harness = hybridHarness();
+  const overlay = new HybridReference(harness.map, harness.L);
+  let release, calls = 0;
+  globalThis.fetch = async () => { calls++; return new Promise((resolve) => release = () => resolve(new Response(JSON.stringify(hybridFixture())))); };
+  try {
+    const pending = overlay.show();
+    assert.equal(harness.active.size, 2, "Raster references cover vector loading");
+    overlay.hide(); release(); await pending;
+    assert.equal(harness.active.size, 0, "Leaving satellite cannot re-add late references");
+    globalThis.fetch = async () => { calls++; return new Response(JSON.stringify(hybridFixture())); };
+    await overlay.show();
+    assert.equal(harness.vectors.length, 1);
+    assert.equal(harness.vectors[0].options.pane, "fuelioHybridLabels");
+    assert.equal(harness.panes.fuelioHybridLabels.style.pointerEvents, "none");
+    assert.ok(Number(harness.panes.fuelioHybridLabels.style.zIndex) < 400);
+    harness.vectors[0].events.idle();
+    assert.equal(harness.active.size, 1, "Ready vector labels replace fallback instead of doubling labels");
+    overlay.hide(); await overlay.show();
+    assert.equal(calls, 2, "A successful style is reused on the next toggle");
+  } finally { overlay.hide(); globalThis.fetch = originalFetch; }
+});
+
+test("Hybrid retains road/place references when vector rendering fails or is unavailable", async () => {
+  const originalFetch = globalThis.fetch, warnings = [], h = hybridHarness();
+  const overlay = new HybridReference(h.map, h.L, (text) => warnings.push(text));
+  globalThis.fetch = async () => new Response(JSON.stringify(hybridFixture()));
+  try {
+    await overlay.show(); h.vectors[0].events.idle(); h.vectors[0].events.error();
+    assert.equal(h.active.size, 2); assert.equal(warnings.length, 1);
+    assert.ok([...h.active].every((layer) => layer.options.pane === "fuelioHybridFallback"));
+    overlay.hide(); assert.equal(h.active.size, 0);
+    const plain = hybridHarness(false), fallback = new HybridReference(plain.map, plain.L);
+    await fallback.show(); assert.equal(plain.active.size, 2); fallback.hide();
+    const unavailable = hybridHarness(), offline = new HybridReference(unavailable.map, unavailable.L);
+    globalThis.fetch = async () => new Response("Unavailable", { status: 503 });
+    await offline.show(); assert.equal(unavailable.active.size, 2); offline.hide();
+  } finally { overlay.hide(); globalThis.fetch = originalFetch; }
+});
 
 test("Release guard: optimiser, routing maths, imports, libraries and Samsara code are unchanged", async () => {
   const hash = (text) => createHash("sha256").update(text).digest("hex");
@@ -698,6 +780,7 @@ test("Build output contains the app and excludes server code and credential inst
     "geo.js",
     "data.js",
     "styles.css",
+    "hybrid-map.js",
     "vendor/leaflet/leaflet.js",
   ])
     assert.ok(
@@ -805,6 +888,9 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
   });
   const map = {
     ...chain(),
+    panes: {},
+    getPane(name) { return this.panes[name]; },
+    createPane(name) { return this.panes[name] = { style: {} }; },
     setView(point, zoom) {
       this.point = point; this.zoom = zoom;
       return this;
@@ -1011,7 +1097,10 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     assert.equal(staged.inputs.capacity, "240");
     await tools.get("find_fco_routes").execute({});
     assert.match(el("routeCards").textContent, /Route 1/);
+    assert.equal(groups[3].layers.length, 1, "Finding routes hides other Planner trucks");
+    assert.match(groups[3].layers[0].popup, /TRUCK 104/);
     await tools.get("calculate_fco_fuel_plans").execute({});
+    assert.equal(groups[3].layers.length, 1, "Fuelio Hunt keeps only the trip truck");
     assert.match(el("results").textContent, /LOWEST FUEL SPEND/);
     const summary = tools.get("read_fco_workspace").execute({});
     assert.equal(summary.plans[0].status, "optimal");
@@ -1068,11 +1157,13 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
       assert.match(marker.popup, /72 MPH.*67%.*6.62/); assert.equal(marker.tooltip, marker.popup);
       assert.match(marker.icon.html, /rocket/);
       w.document.querySelector('[data-view="planner"]').click();
-      assert.equal(groups[3].layers.length, 2);
+      assert.equal(groups[3].layers.length, 1);
       assert.ok(groups[3].layers.every((m) => m.icon.html.includes("ufo")));
       const before = el("truck").value;
-      groups[3].layers.find((m) => m.popup?.includes("TRUCK 156")).events.click();
+      groups[3].layers[0].events.click();
       assert.equal(el("truck").value, before);
+      await refresh();
+      assert.equal(groups[3].layers.length, 1, "Live refresh must not reintroduce other trucks");
     });
     await t.test("Fuel Stops list-only search, marker selection and price sort/reset preserve the master and theme", async () => {
       w.document.querySelector('[data-view="pumps"]').click();
@@ -1154,6 +1245,8 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     el("workbookUse").click();
     await uploading;
     assert.match(el("sourceBadge").textContent, /prices.xlsx · 1 stops/);
+    el("resetTrip").click();
+    assert.equal(groups[3].layers.length, 2, "Clearing the trip restores active Planner trucks");
   } finally {
     for (const timer of timers) clearTimeout(timer);
     dom.window.close();

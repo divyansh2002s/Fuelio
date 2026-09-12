@@ -1,0 +1,112 @@
+{
+  "update": "Fuelio Map and Hybrid",
+  "baseline": "Fuelio Pages Update",
+  "updated_files": [
+    {
+      "file": "styles.css",
+      "action": "replace",
+      "sha256": "a2adab6101e2e261e687583d39c42ba0166d47de7e74ebf76714b60fa3442c01",
+      "previous_sha256": "97a8b98e6f7ad95714ada4d07c70b2be98340dfd0295cf241aa320a83c38496b"
+    },
+    {
+      "file": "workspace.js",
+      "action": "replace",
+      "sha256": "dff78d6ace9b6c3b66d718a1681bfb15321490b2f06f38ddb92639e813027eaf",
+      "previous_sha256": "7af04d591c775791e03820efdd03412465bf744b413a5fe1dfa2d4ec9a22c5ed"
+    },
+    {
+      "file": "build.js",
+      "action": "replace",
+      "sha256": "1dd01acd8142f1a57a5e190970b77e5e99f9c9c336e9a136a21eaefdca3c0157",
+      "previous_sha256": "b173e58284a2eb294eee82d916f93a5ea2d02d9f21a09d8fdea8102fbd2fa429"
+    },
+    {
+      "file": "tests.mjs",
+      "action": "replace",
+      "sha256": "ea19dbd84838b4862ee929b65d37566f8a4a46b5afefd6ff7c9aac66546a1661",
+      "previous_sha256": "4cdf6701c1a5141e3a73edc50c9c0605a68521b1260dbee6c50841f15f5293d8"
+    },
+    {
+      "file": "hybrid-map.js",
+      "action": "add",
+      "sha256": "ea8473ae10e6ce83503f4a4c37c4074ddcdf3c05579e679dceae30815948c5f9"
+    },
+    {
+      "file": "UPDATE-MAP-HYBRID.md",
+      "action": "add",
+      "sha256": "511f2badf8a4a07afe880e56fc72088d6986e3a768d7aab10afbfd7e4628dfba"
+    }
+  ],
+  "unchanged_files": [
+    {
+      "file": "optimizer.js",
+      "sha256": "bf5cb7067a8bd6d8666046029d390d50a8f01da063ef3e67b900bde3d854e610"
+    },
+    {
+      "file": "worker.js",
+      "sha256": "6a509bb6753aacbe957c71653d5ff8039fc6cfdabfaa760227be5cacc2bd0569"
+    },
+    {
+      "file": "geo.js",
+      "sha256": "72481ad5da8e32ffd859338ec46b18c92f1a48e09b4f024f4bebc7cd629a2651"
+    },
+    {
+      "file": "data.js",
+      "sha256": "ea8cc7a6e7080efded729554700d36b93c2aa19de98f1a70eba67de4816e2ab6"
+    },
+    {
+      "file": "batch.js",
+      "sha256": "363f015035309e986ef344f4c529e65f7fa037af78328cd8ea66c9d8c2648eb0"
+    },
+    {
+      "file": "server.js",
+      "sha256": "941ae3e9e42f88a1370dde26890162f43ff32e346ba839824b2585377981914f"
+    },
+    {
+      "file": "route-library.json",
+      "sha256": "8e91bec88bf9447a9f8aef2296c1e6218d4840ae9bbde39f9b18bb51fcee09d8"
+    },
+    {
+      "file": "california.json",
+      "sha256": "7a9b38fa07c169af8d1dc5ab43047b414a367633ccec476c1c3ecb3c6ed9a3b5"
+    },
+    {
+      "file": "package.json",
+      "sha256": "a00df0250739ca06cdcf0528eeb4caf225fda0647ccc53f81c8a5b190f9bf61a"
+    },
+    {
+      "file": "package-lock.json",
+      "sha256": "8c57b4c7d028ed9fe892a3d7c3d68a77952a064d0cfb8506935c4df352f10f61"
+    },
+    {
+      "file": "vercel.json",
+      "sha256": "645712fa90aaee3a1f6bf7541347aa7645eaba6a92689710f7f9a92065cf09eb"
+    },
+    {
+      "file": "index.html",
+      "sha256": "b7a16304f33cdeb252b72b643c410e105c9dbc28beb24d15fb459e92c44e92f8"
+    },
+    {
+      "file": "messages.js",
+      "sha256": "5af21053f8520825cc16598e0c72ab349b3eceb897b821a35b0318cd807748bb"
+    },
+    {
+      "file": "message-editor.js",
+      "sha256": "bf198c50eb5ac8a56246b7cd7a72d2f84f75de08dcfe6da37e0f2cc39bdd271a"
+    },
+    {
+      "file": "view-model.js",
+      "sha256": "467be4a5619886b077e25cd0a7d541ca72593587443df5bcc5faf18a98705634"
+    },
+    {
+      "file": "place-search.js",
+      "sha256": "e678a4beca2d26213485b3171b81112a81eb00720dcbc9907d9443c06a35da89"
+    }
+  ],
+  "verification": {
+    "automated_tests": 53,
+    "failures": 0,
+    "live_style_validation_errors": 0,
+    "visual_browser_check": "Blocked by local preview security policy"
+  }
+}

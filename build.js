@@ -17,6 +17,7 @@ const files = [
   "message-editor.js",
   "view-model.js",
   "place-search.js",
+  "hybrid-map.js",
   "vehicle-rocket.svg",
   "vehicle-ufo.svg",
   "fuelio-brand.png",

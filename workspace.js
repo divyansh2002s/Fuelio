@@ -21,6 +21,7 @@ import { planMessage, customMessage, pumpLine } from "./messages.js";
 import { parseLoads, prepareLoads } from "./batch.js";
 import { MessageEditor } from "./message-editor.js";
 import { bindPlaceSearch } from "./place-search.js";
+import { HybridReference } from "./hybrid-map.js";
 import { activeVehicles, searchStops, stopMapRows, stopNumber, mergeVehicleDetail, routeHighways, vehicleIconHTML } from "./view-model.js";
 
 const $ = (id) => document.getElementById(id),
@@ -814,6 +815,13 @@ function createMap() {
     );
   });
   setMapMode(state.mapMode);
+  if (typeof ResizeObserver !== "undefined") {
+    state.mapResizeObserver = new ResizeObserver(() => {
+      cancelAnimationFrame(state.mapResizeFrame);
+      state.mapResizeFrame = requestAnimationFrame(() => state.map?.invalidateSize({ pan: false }));
+    });
+    state.mapResizeObserver.observe($("map"));
+  }
 }
 async function setMapMode(mode) {
   if (!state.map) return;
@@ -822,37 +830,19 @@ async function setMapMode(mode) {
   $("satelliteBtn").classList.toggle("active", mode === "satellite");
   $("mapShell").classList.toggle("satellite", mode === "satellite");
   state.map.removeLayer(state.base);
-  if (state.labelLayer && state.map.hasLayer(state.labelLayer))
-    state.map.removeLayer(state.labelLayer);
+  if (!state.hybridReference)
+    state.hybridReference = new HybridReference(state.map, L, (message) => log(message, "warning"));
+  state.hybridReference.hide();
   if (mode === "satellite") {
     state.base = L.tileLayer(
       "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
       {
         maxZoom: 19,
-        attribution: "Imagery: USGS · Labels: OpenFreeMap / OpenStreetMap",
+        maxNativeZoom: 16,
+        attribution: 'Imagery: <a href="https://www.usgs.gov/programs/national-geospatial-program/national-map">USGS</a>',
       },
     ).addTo(state.map);
-    try {
-      if (!state.labelLayer && L.maplibreGL) {
-        const response = await fetch(
-          "https://tiles.openfreemap.org/styles/liberty",
-        );
-        const style = await response.json();
-        style.layers = style.layers.filter(
-          (l) =>
-            l.type === "symbol" ||
-            (l.type === "line" && /road|transport|highway/.test(l.id)),
-        );
-        state.labelLayer = L.maplibreGL({ style, interactive: false });
-      }
-      if (state.mapMode === "satellite" && state.labelLayer)
-        state.labelLayer.addTo(state.map);
-    } catch {
-      log(
-        "Satellite imagery loaded; road labels are temporarily unavailable.",
-        "warning",
-      );
-    }
+    void state.hybridReference.show();
   } else
     state.base = L.tileLayer(
       "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
@@ -934,7 +924,11 @@ function drawTruck() {
   if (!state.truckLayer) return;
   const kind = state.view === "fleet" ? "rocket" : "ufo";
   if (!state.truckMarkers || state.truckKind !== kind || state.truckClient !== state.client) { state.truckLayer.clearLayers(); state.truckMarkers = new Map(); state.truckKind = kind; state.truckClient = state.client; }
-  const list = state.view === "fleet" ? fleetRows() : state.view === "planner" ? activeVehicles(state.vehicles) : [];
+  const active = activeVehicles(state.vehicles);
+  const planningTruckOnly = state.routes.length > 0 || state.plans.length > 0;
+  const list = state.view === "fleet" ? fleetRows() : state.view === "planner"
+    ? planningTruckOnly ? active.filter((v) => v.id === state.vehicle?.id) : active
+    : [];
   const ids = new Set(list.filter((v) => number(v.lat) !== null && number(v.lng) !== null).map((v) => v.id));
   for (const [id, marker] of state.truckMarkers) if (!ids.has(id)) { state.truckLayer.removeLayer?.(marker); state.truckMarkers.delete(id); }
   for (const v of list) {
@@ -1410,7 +1404,7 @@ async function solveSelected() {
       for (const p of good) state.history.unshift(p);
       state.history = state.history.slice(0, 30);
       await dbPut("history", state.history);
-      $("plannerContent").scrollTo?.({ top: $("results").offsetTop - $("plannerContent").offsetTop, behavior: "smooth" });
+      // Keep the larger map in view; the route/results area scrolls below it.
     }
   } finally {
     state.activeSolve = null;
