@@ -688,6 +688,36 @@ app.get("/api/vehicle-detail", async (req, res) => {
   res.json({ vehicle: id, ...details });
 });
 
+// Live suggestions use Photon, which supports autocomplete. Nominatim below
+// remains submit-only. This endpoint does not touch routing or Samsara data.
+const PHOTON = (process.env.PHOTON_URL || "https://photon.komoot.io").replace(/\/$/, "");
+app.get("/api/suggest", async (req, res) => {
+  const text = clean(req.query.q);
+  if (text.length < 3 || text.length > 250) return res.json({ results: [] });
+  const coords = parseCoordinates(text);
+  if (coords) return res.json({ results: [{ ...coords, label: text }] });
+  const results = await cached(`suggest:${text.toLowerCase()}`, 86400000, () =>
+    deadline(12000, null, "Address suggestions", (signal) => paced("photon", 600, async () => {
+      signal.throwIfAborted();
+      const response = await fetch(`${PHOTON}/api/?${new URLSearchParams({ q: text, countrycode: "US", lang: "en", limit: "6" })}`, {
+        headers: { Accept: "application/json", "User-Agent": "Fuelio/1.0 (interactive address suggestions)" },
+        signal, redirect: "error",
+      });
+      if (!response.ok) throw new Error("Address suggestions are temporarily unavailable. Press Enter to search.");
+      const data = await response.json();
+      if (!Array.isArray(data.features)) throw new Error("Address suggestions returned an unexpected response.");
+      return data.features.filter((r) => String(r.properties?.countrycode).toUpperCase() === "US")
+        .map((r) => {
+          const p = r.properties || {}, [lng, lat] = r.geometry?.coordinates || [];
+          const street = [p.housenumber, p.street].filter(Boolean).join(" ");
+          const label = [...new Set([p.name, street, p.city || p.county, p.state, p.postcode].filter(Boolean))].join(", ");
+          return { lat: number(lat), lng: number(lng), label, state: p.state || "" };
+        }).filter((p) => p.label && p.lat !== null && p.lng !== null && p.lat >= 18 && p.lat <= 72 && p.lng >= -180 && p.lng <= -60).slice(0,6);
+    })),
+  );
+  res.json({ results });
+});
+
 // Submit-only US geocoding. No autocomplete requests are sent to public Nominatim.
 const NOMINATIM = (
   process.env.NOMINATIM_URL || "https://nominatim.openstreetmap.org"

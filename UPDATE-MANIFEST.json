@@ -1,0 +1,82 @@
+{
+  "package": "Fuelio-Pages-Update",
+  "kind": "changed-and-new-files-only",
+  "created": "2026-09-12",
+  "files": [
+    {
+      "path": "index.html",
+      "bytes": 25118,
+      "sha256": "b7a16304f33cdeb252b72b643c410e105c9dbc28beb24d15fb459e92c44e92f8"
+    },
+    {
+      "path": "styles.css",
+      "bytes": 42869,
+      "sha256": "97a8b98e6f7ad95714ada4d07c70b2be98340dfd0295cf241aa320a83c38496b"
+    },
+    {
+      "path": "workspace.js",
+      "bytes": 98631,
+      "sha256": "7af04d591c775791e03820efdd03412465bf744b413a5fe1dfa2d4ec9a22c5ed"
+    },
+    {
+      "path": "messages.js",
+      "bytes": 3594,
+      "sha256": "5af21053f8520825cc16598e0c72ab349b3eceb897b821a35b0318cd807748bb"
+    },
+    {
+      "path": "server.js",
+      "bytes": 35681,
+      "sha256": "941ae3e9e42f88a1370dde26890162f43ff32e346ba839824b2585377981914f"
+    },
+    {
+      "path": "build.js",
+      "bytes": 1822,
+      "sha256": "b173e58284a2eb294eee82d916f93a5ea2d02d9f21a09d8fdea8102fbd2fa429"
+    },
+    {
+      "path": "tests.mjs",
+      "bytes": 63202,
+      "sha256": "4cdf6701c1a5141e3a73edc50c9c0605a68521b1260dbee6c50841f15f5293d8"
+    },
+    {
+      "path": "message-editor.js",
+      "bytes": 16789,
+      "sha256": "bf198c50eb5ac8a56246b7cd7a72d2f84f75de08dcfe6da37e0f2cc39bdd271a"
+    },
+    {
+      "path": "view-model.js",
+      "bytes": 3282,
+      "sha256": "467be4a5619886b077e25cd0a7d541ca72593587443df5bcc5faf18a98705634"
+    },
+    {
+      "path": "place-search.js",
+      "bytes": 3485,
+      "sha256": "e678a4beca2d26213485b3171b81112a81eb00720dcbc9907d9443c06a35da89"
+    },
+    {
+      "path": "message-template.csv",
+      "bytes": 180,
+      "sha256": "e28fdf637249e2b09e1454cca5432c2b88dc2376b11b2cae80d6ae3d97645a1b"
+    },
+    {
+      "path": "vehicle-rocket.svg",
+      "bytes": 1075,
+      "sha256": "05f870b79b568a322e944e895d76c40e5c5988b896a36b62197c406fb18173c2"
+    },
+    {
+      "path": "vehicle-ufo.svg",
+      "bytes": 625,
+      "sha256": "e16075d182b2e09a64110b024fee4fa6fafbb9b4d392f2898f2a2dcb58b67548"
+    },
+    {
+      "path": "fuelio-brand.png",
+      "bytes": 1483480,
+      "sha256": "8d3537d6f3b749ea6afdc7a376c300b16bbe216e6a6f32721411ea53199585ca"
+    },
+    {
+      "path": "UPDATE-FUELIO.md",
+      "bytes": 7088,
+      "sha256": "63eaf00e0ff3421450c68c24e3e87d86edb8ca739f780c0450f20af811d514d3"
+    }
+  ]
+}

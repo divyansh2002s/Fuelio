@@ -13,6 +13,13 @@ const files = [
   "california.json",
   "fuel-template.csv",
   "load-template.csv",
+  "message-template.csv",
+  "message-editor.js",
+  "view-model.js",
+  "place-search.js",
+  "vehicle-rocket.svg",
+  "vehicle-ufo.svg",
+  "fuelio-brand.png",
 ];
 await mkdir("public", { recursive: true });
 for (const file of files) await copyFile(file, `public/${file}`);

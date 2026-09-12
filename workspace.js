@@ -19,6 +19,9 @@ import {
 import { validateRules, verifyPlan } from "./optimizer.js";
 import { planMessage, customMessage, pumpLine } from "./messages.js";
 import { parseLoads, prepareLoads } from "./batch.js";
+import { MessageEditor } from "./message-editor.js";
+import { bindPlaceSearch } from "./place-search.js";
+import { activeVehicles, searchStops, stopMapRows, stopNumber, mergeVehicleDetail, routeHighways, vehicleIconHTML } from "./view-model.js";
 
 const $ = (id) => document.getElementById(id),
   $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -36,6 +39,7 @@ const fmt = (n, d = 1) =>
       })
     : "—";
 const time = (s) => `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
+const uiText = (value) => String(value ?? "").replace(/\bPumps\b/g, "Stops").replace(/\bPump\b/g, "Stop").replace(/\bpumps\b/g, "stops").replace(/\bpump\b/g, "stop");
 const colours = ["#2457da", "#168767", "#b87917", "#b44885", "#58829f"];
 const FORM_IDS = [
   "truck",
@@ -88,7 +92,9 @@ const state = {
   log: [],
   overrides: restored.overrides || {},
   sourcePrefs: restored.sourcePrefs || null,
-  highways: new Set(),
+  highways: new Set(restored.stopView?.highways || []),
+  focusedPump: restored.stopView?.selectedId ? { id: restored.stopView.selectedId } : null,
+  pendingStopState: restored.stopView?.state || "",
   map: null,
   heat: !!restored.heat,
   mapMode: restored.mapMode || "map",
@@ -99,6 +105,12 @@ const state = {
   planForMessage: null,
   accessCache: new Map(),
   ca: null,
+  detailCache: new Map(),
+  detailPending: new Map(),
+  focusedTruck: null,
+  waypointItems: [],
+  findSeq: 0,
+  planMessageDrafts: new Map(),
 };
 const dbPromise = new Promise((resolve) => {
   try {
@@ -158,6 +170,14 @@ function persist() {
         overrides: state.overrides,
         mapMode: state.mapMode,
         heat: state.heat,
+        stopView: {
+          query: $("pumpSearch").value,
+          state: $("stateFilter").value || state.pendingStopState,
+          highways: [...state.highways],
+          highwaySearch: $("highwaySearch").value,
+          sort: $("priceSort").value,
+          selectedId: state.focusedPump?.id || null,
+        },
       }),
     );
   } catch {
@@ -165,7 +185,7 @@ function persist() {
   }
 }
 function toast(message) {
-  $("toast").textContent = message;
+  $("toast").textContent = uiText(message);
   $("toast").hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => ($("toast").hidden = true), 4500);
@@ -174,11 +194,11 @@ function notice(message) {
   $("notice").hidden = !message;
   if (message)
     $("notice").innerHTML =
-      `<span>${h(message)}</span><button class="text-button" id="dismissNotice" aria-label="Dismiss notice">×</button>`;
+      `<span>${h(uiText(message))}</span><button class="text-button" id="dismissNotice" aria-label="Dismiss notice">×</button>`;
   if ($("dismissNotice")) $("dismissNotice").onclick = () => notice("");
 }
 function log(message, type = "info") {
-  state.log.unshift({ message, type, time: new Date().toISOString() });
+  state.log.unshift({ message: uiText(message), type, time: new Date().toISOString() });
   state.log = state.log.slice(0, 200);
   renderLog();
 }
@@ -213,10 +233,15 @@ function action(fn) {
       }
     } finally {
       if (button instanceof HTMLButtonElement) button.disabled = false;
+      if (button?.id === "solveRoutes") updateRouteStatus();
     }
   };
 }
 function setView(view) {
+  // Hide only the Routes & Loads surface. Its data and functions stay intact.
+  if (view === "library") view = "planner";
+  if (view === "stops") view = "pumps";
+  if (state.view !== view) { state.openStopId = null; state.map?.closePopup?.(); }
   state.view = view;
   $("workspace").dataset.view = view;
   $$(".nav").forEach((b) =>
@@ -235,7 +260,6 @@ function setView(view) {
       (view === "pumps" ? "pump" : view === "messages" ? "message" : view);
   if (view === "fleet") renderFleet();
   if (view === "pumps") renderPumps();
-  if (view === "library") renderLibrary();
   if (view === "messages") renderMessages();
   if (view === "activity") {
     renderLog();
@@ -247,6 +271,10 @@ function setView(view) {
     if (view === "fleet") fitMap();
   });
   location.hash = view;
+  $("heatBtn").hidden = view === "fleet";
+  $("mapCaption").hidden = view === "fleet";
+  $("solveBar").hidden = view !== "planner";
+  if (view === "fleet" || view === "planner") hydrateVisibleVehicles();
 }
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -319,12 +347,22 @@ function routeOptions() {
 }
 function tripStamp() {
   return JSON.stringify([
+    state.client,
+    $("truck").value.trim(),
     $("origin").value.trim(),
     $("destination").value.trim(),
     $("waypoints").value.trim(),
     $("routingProfile").value,
     routeOptions(),
   ]);
+}
+function updateRouteStatus() {
+  const stale = state.routes.length && state.routeStamp !== tripStamp();
+  $("routeInputStatus").textContent = stale
+    ? "Truck, locations or routing settings changed. Find routes again."
+    : state.routes.length ? "Routes ready. Fuel changes only need Fuelio Hunt." : "Choose your locations, then find routes.";
+  $("routeInputStatus").classList.toggle("error", !!stale);
+  $("solveRoutes").disabled = !!state.activeSolve || !state.routes.length || !state.selected.size || !!stale;
 }
 
 async function loadConfig(initial = false) {
@@ -383,14 +421,8 @@ async function loadConfig(initial = false) {
       .map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`)
       .join("");
   $("master").value = state.master;
-  const previous = $("messageMaster").value || state.messageMasterId || "";
-  $("messageMaster").innerHTML =
-    '<option value="">Use loaded fuel pumps</option>' +
-    r.messageMasters
-      .map((m) => `<option value="${h(m.id)}">${h(m.name)}</option>`)
-      .join("");
-  if (r.messageMasters.some((m) => m.id === previous))
-    $("messageMaster").value = previous;
+  state.messageEditor?.setMasters(r.messageMasters);
+  state.resultEditor?.setMasters(r.messageMasters);
   $("settingsStatus").textContent =
     `${r.privateMaster ? "Private Master connected" : "Private Master is not connected"} · ${r.clients.length} clients · ${r.masters.length} fuel masters. ${r.truckRouting ? "Truck routing is configured." : "Standard routing is available."}`;
   if (!state.client) {
@@ -414,19 +446,19 @@ async function loadConfig(initial = false) {
   if (currentMaster !== state.master) persist();
 }
 function vehicleLabel(vehicle) {
-  return state.vehicles.filter((v) => v.name === vehicle.name).length > 1
+  return activeVehicles(state.vehicles).filter((v) => v.name === vehicle.name).length > 1
     ? `${vehicle.name} · ${vehicle.id}`
     : vehicle.name;
 }
 function findTruck(value) {
-  const exact = state.vehicles.find((v) => vehicleLabel(v) === value);
+  const exact = activeVehicles(state.vehicles).find((v) => vehicleLabel(v) === value);
   if (exact) return exact;
   const unit = value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]/g, "");
   if (!unit) return null;
-  const matches = state.vehicles.filter((v) => {
+  const matches = activeVehicles(state.vehicles).filter((v) => {
     const name = v.name.toLowerCase().replace(/[^a-z0-9]/g, "");
     return (
       name === unit || (/^\d+$/.test(unit) && name.match(/\d+$/)?.[0] === unit)
@@ -462,17 +494,22 @@ async function updateFleet(client, seq) {
   }
   if (seq !== state.fleetSeq || client !== state.client) return;
   state.vehicles = result.vehicles;
-  $("trucks").innerHTML = result.vehicles
+  const vehicles = activeVehicles(result.vehicles);
+  $("trucks").innerHTML = vehicles
     .map(
       (v) =>
         `<option value="${h(vehicleLabel(v))}" label="${h([v.make, v.model].filter(Boolean).join(" "))}"></option>`,
     )
     .join("");
   if (state.vehicle) {
-    const next = result.vehicles.find((v) => v.id === state.vehicle.id);
+    const next = vehicles.find((v) => v.id === state.vehicle.id);
     if (next) {
       state.vehicle = { ...state.vehicle, ...next };
       applyLive();
+    } else {
+      state.vehicle = null;
+      $("truck").value = "";
+      renderTelemetry();
     }
   } else {
     const v = findTruck($("truck").value);
@@ -483,13 +520,15 @@ async function updateFleet(client, seq) {
     }
   }
   $("connection").textContent =
-    `${result.vehicles.length} trucks · ${result.partial ? "partial data · see Activity" : "live every 60 sec"}`;
+    `${vehicles.length} trucks · ${result.partial ? "partial data · see Activity" : "live every 60 sec"}`;
   $("connection").classList.toggle("connected", !result.partial);
   if (result.warnings.length) log(result.warnings.join(" "), "warning");
   drawTruck();
   if (state.view === "fleet") renderFleet();
   // Optional reports must not block the truck list or the next fleet refresh.
   if (state.vehicle) void loadVehicleDetail().catch((error) => log(error.message, "warning"));
+  hydrateVisibleVehicles();
+  updateRouteStatus();
 }
 function applyLive(force = false) {
   const v = state.vehicle;
@@ -532,6 +571,7 @@ function applyLive(force = false) {
   drawTruck();
   if (state.view === "fleet") renderFleet();
   persist();
+  updateRouteStatus();
 }
 async function chooseTruck() {
   const name = $("truck").value;
@@ -554,66 +594,91 @@ async function chooseTruck() {
     updateFuelUI();
   }
   persist();
+  updateRouteStatus();
+}
+function displayedVehicle(vehicle) {
+  return mergeVehicleDetail(vehicle, state.detailCache.get(`${state.client}:${vehicle.id}`)?.data);
+}
+async function fetchVehicleDetail(vehicle, force = false) {
+  const client = state.client, key = `${client}:${vehicle.id}`;
+  if (!client) return null;
+  const entry = state.detailCache.get(key);
+  const ttl = number(vehicle.fuelPercent) === null || number(entry?.data?.mpg) === null ? 55000 : 15 * 60000;
+  if (entry && Date.now() - entry.at < (force ? 55000 : ttl)) return entry.data;
+  if (state.detailPending.has(key)) return state.detailPending.get(key);
+  const job = (async () => {
+    try {
+      const data = await api(`vehicle-detail?client=${encodeURIComponent(client)}&vehicle=${encodeURIComponent(vehicle.id)}`);
+      state.detailCache.set(key, { data, at: Date.now() });
+      if (client === state.client) {
+        if (state.vehicle?.id === vehicle.id) { state.vehicle = mergeVehicleDetail(state.vehicle, data); applyLive(); }
+        if (state.view === "fleet") renderFleet();
+        drawTruck();
+      }
+      return data;
+    } catch (error) {
+      // Retain known telemetry; failed optional reports never invent zero fuel or MPG.
+      state.detailCache.set(key, { data: entry?.data || {}, at: Date.now() });
+      log(`${vehicle.name}: ${error.message}`, "warning");
+      return entry?.data || null;
+    } finally { state.detailPending.delete(key); }
+  })();
+  state.detailPending.set(key, job);
+  return job;
 }
 async function loadVehicleDetail() {
   if (!state.vehicle || !state.client) return;
-  const id = state.vehicle.id,
-    client = state.client;
-  try {
-    const d = await api(
-      `vehicle-detail?client=${encodeURIComponent(client)}&vehicle=${encodeURIComponent(id)}`,
-    );
-    if (client !== state.client || id !== state.vehicle?.id) return;
-    if (number(d.mpg) !== null) {
-      state.vehicle.mpg = d.mpg;
-      state.vehicle.mpgSource = d.mpgSource;
-    }
-    if (state.vehicle.fuelPercent === null && d.historyFuel) {
-      state.vehicle.fuelPercent = d.historyFuel.value;
-      state.vehicle.fuelTime = d.historyFuel.time;
-      state.vehicle.fuelSource = "history";
-    }
+  const id = state.vehicle.id, client = state.client;
+  const d = await fetchVehicleDetail(state.vehicle, true);
+  if (d && state.client === client && state.vehicle?.id === id) {
+    state.vehicle = mergeVehicleDetail(state.vehicle, d);
     applyLive();
-    if (d.warnings.length) log(d.warnings.join(" "), "warning");
-  } catch (e) {
-    log(e.message, "warning");
   }
+  if (d?.warnings?.length) log(d.warnings.join(" "), "warning");
+}
+let hydrationJob = null;
+function hydrateVisibleVehicles() {
+  if (!state.client || !["fleet", "planner"].includes(state.view)) return;
+  if (hydrationJob?.client === state.client) return;
+  const client = state.client;
+  const queue = activeVehicles(state.vehicles).filter((v) => {
+    const cached = state.detailCache.get(`${client}:${v.id}`);
+    return !cached || Date.now() - cached.at >= (number(v.fuelPercent) === null || number(cached.data?.mpg) === null ? 55000 : 15 * 60000);
+  });
+  if (!queue.length) return;
+  queue.sort((a, b) => Number(b.id === state.vehicle?.id || b.id === state.focusedTruck) - Number(a.id === state.vehicle?.id || a.id === state.focusedTruck));
+  const job = { client };
+  hydrationJob = job;
+  const run = async () => {
+    while (queue.length && client === state.client && ["fleet", "planner"].includes(state.view)) {
+      const vehicle = queue.shift();
+      await fetchVehicleDetail(vehicle);
+    }
+  };
+  // Optional detail reports are paced at two concurrent requests, separate from 60s snapshots.
+  void Promise.all([run(), run()]).finally(() => { if (hydrationJob === job) hydrationJob = null; });
 }
 function renderTelemetry() {
   const v = state.vehicle;
-  if (!v) {
-    $("telemetryTitle").textContent = "Manual planning";
-    $("liveTime").textContent = "API connection optional";
-    $("telemetryBody").textContent =
-      "All trip values are editable. Connect a client to load live truck information.";
-    return;
-  }
+  $("telemetryDetails").hidden = !v;
+  if (!v) return;
   $("telemetryTitle").textContent = v.name;
-  $("liveTime").textContent = v.gpsTime
-    ? `GPS ${new Date(v.gpsTime).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}`
-    : "GPS unavailable";
-  const entries = [
-    ["Location", "location", v.location],
-    ["Speed · mph", "speed", v.speed],
-    [
-      "Odometer · mi",
-      "odometer",
-      v.odometer == null ? "" : v.odometer.toFixed(1),
-    ],
-    ["Heading · degrees", "heading", v.heading],
-    ["Engine", "engine", v.engine],
-    ["VIN", "vin", v.vin],
-    ["Make", "make", v.make],
-    ["Model", "model", v.model],
-    ["Year", "year", v.year],
-    ["Plate", "licensePlate", v.licensePlate],
-  ];
+  $("liveTime").textContent = v.gpsTime ? new Date(v.gpsTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "GPS unavailable";
   if ($("telemetryBody").contains(document.activeElement)) return;
-  $("telemetryBody").innerHTML =
-    `<div class="live-grid">${entries.map(([label, key, value]) => `<div><label for="live-${key}">${label}</label><input id="live-${key}" data-live-field="${key}" value="${h(manualEdits()["live-" + key] ?? value ?? "")}" placeholder="Not supplied"></div>`).join("")}</div><p class="field-help">Fuel: ${v.fuelPercent === null ? "not supplied" : fmt(v.fuelPercent, 1) + "%"}${v.fuelTime ? " · " + h(new Date(v.fuelTime).toLocaleString()) : ""}${v.fuelSource === "history" ? " · history fallback" : ""}<br>MPG: ${h(v.mpgSource || "manual / fallback value")}</p>`;
-  $$("[data-live-field]").forEach(
-    (el) => (el.oninput = () => markManual(el.id, el.value)),
-  );
+  const actual = displayedVehicle(v);
+  $("telemetryBody").innerHTML = `<div class="compact-telemetry">
+    <label>Speed · MPH<input data-compact="speed" type="number" min="0" step="1" value="${h(manualEdits()["live-speed"] ?? actual.speed ?? "")}" placeholder="—"></label>
+    <label>Fuel · %<input data-compact="fuel" type="number" min="0" max="100" step="0.01" value="${h($("fuelPercent").value)}" placeholder="—"></label>
+    <label>MPG<input data-compact="mpg" type="number" min=".1" step=".01" value="${h($("mpg").value)}" placeholder="—"></label>
+    </div><p class="telemetry-source">Live fuel: ${number(actual.fuelPercent) === null ? "—" : fmt(number(actual.fuelPercent), 1) + "%"}${actual.fuelSource === "history" ? " · history fallback" : ""} · MPG: ${number(actual.mpg) === null ? "not supplied" : fmt(number(actual.mpg), 2)}</p>`;
+  $$("[data-compact]").forEach((el) => el.oninput = () => {
+    if (el.dataset.compact === "speed") markManual("live-speed", el.value);
+    else {
+      const target = $(el.dataset.compact === "fuel" ? "fuelPercent" : "mpg");
+      target.value = el.value;
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
 }
 
 async function applyFuel(data, prefs, background = false) {
@@ -625,7 +690,7 @@ async function applyFuel(data, prefs, background = false) {
     state.plans = [];
     $("results").innerHTML = "";
   }
-  $("sourceBadge").textContent = `${data.source} · ${data.rows.length} pumps`;
+  $("sourceBadge").textContent = `${data.source} · ${data.rows.length} stops`;
   $("dataIssueCount").textContent =
     `Data checks · ${(data.issues || []).length} notes`;
   $("dataIssues").innerHTML =
@@ -636,8 +701,8 @@ async function applyFuel(data, prefs, background = false) {
   persist();
   renderPumps();
   drawMap();
-  log(`Loaded ${data.rows.length} pumps from ${data.source}.`);
-  if (!state.messageRows) renderMessages();
+  log(`Loaded ${data.rows.length} stops from ${data.source}.`);
+  renderMessages();
 }
 async function loadMaster() {
   const sequence = ++state.fuelSeq;
@@ -724,18 +789,24 @@ function createMap() {
   state.truckLayer = L.layerGroup().addTo(map);
   state.connectorLayer = L.layerGroup().addTo(map);
   map.on("click", (e) => {
+    state.openStopId = null;
+    state.map.closePopup?.();
+    for (const marker of [...(state.pumpMarkers?.values() || []), ...(state.truckMarkers?.values() || [])]) marker.closeTooltip?.();
+    if (state.view !== "planner") return;
     const mode = $("mapClick").value;
     if (mode === "none") return;
     const text = `${e.latlng.lat.toFixed(6)}, ${e.latlng.lng.toFixed(6)}`;
-    if (mode === "waypoint")
-      $("waypoints").value = [$("waypoints").value.trim(), text]
-        .filter(Boolean)
-        .join("\n");
+    if (mode === "waypoint") {
+      if (state.waypointItems.length >= 23) { toast("Use no more than 23 waypoints."); return; }
+      state.waypointItems.push({ id: crypto.randomUUID(), value: text });
+      renderWaypoints(); syncWaypoints();
+    }
     else {
       $(mode).value = text;
       if (mode === "origin") markManual("origin", text);
     }
     persist();
+    updateRouteStatus();
     toast(
       mode === "waypoint"
         ? "Waypoint added."
@@ -795,291 +866,179 @@ async function setMapMode(mode) {
   persist();
 }
 function popup(p) {
-  return `<strong>${h(p.name)}</strong><br>${h(p.location || [p.city, p.state].filter(Boolean).join(", "))}<br><b>${"$"}${p.price.toFixed(4)} / gal</b><br>${h(p.highway || "Highway not supplied")}${p.exit ? " · Exit " + h(p.exit) : ""}<br><small>${h(p.source || state.fuel?.source || "")}</small>`;
+  return `<div class="map-details"><strong>${h(p.name)}</strong><br>${h(p.location || [p.city, p.state].filter(Boolean).join(", "))}<br><b>$${number(p.price) === null ? "—" : Number(p.price).toFixed(4)} / gal</b><br>Highway: ${h(p.highway || "—")} · Exit: ${h(p.exit || "—")}<br><small>${number(p.lat) === null ? "—" : Number(p.lat).toFixed(5)}, ${number(p.lng) === null ? "—" : Number(p.lng).toFixed(5)}</small></div>`;
 }
 function visiblePumps() {
-  const query = $("pumpSearch").value.toLowerCase().trim(),
-    st = $("stateFilter").value;
-  let rows = currentPumps().filter(
-    (p) =>
-      (!st || p.state === st) &&
-      (!state.highways.size ||
-        p.highways.some((hw) => state.highways.has(hw))) &&
-      (!query ||
-        `${p.name} ${p.location} ${p.city} ${p.state} ${STATES.find((s) => s[0] === p.state)?.[1] || ""} ${p.highway} ${p.exit} ${p.price}`
-          .toLowerCase()
-          .includes(query)),
-  );
-  if ($("routeOnly").checked && state.routes.length) {
-    const ids = new Set(
-      state.routes
-        .filter((r) => state.selected.has(r.id))
-        .flatMap((r) =>
-          (
-            r.candidates ||
-            routeCandidates(r, currentPumps(), Number($("corridor").value))
-          ).map((p) => p.pumpId),
-        ),
-    );
-    rows = rows.filter((p) => ids.has(p.id));
-  }
-  if ($("priceSort").value === "low") rows.sort((a, b) => a.price - b.price);
-  if ($("priceSort").value === "high") rows.sort((a, b) => b.price - a.price);
-  return rows;
+  return searchStops(currentPumps(), { query: $("pumpSearch").value, state: $("stateFilter").value, highways: state.highways, sort: $("priceSort").value });
+}
+function pumpsOnMap() {
+  return stopMapRows(currentPumps(), visiblePumps(), state.highways);
 }
 function drawMap() {
   if (!state.map) return;
-  state.routeLayer.clearLayers();
-  state.pointLayer.clearLayers();
-  state.pumpLayer.clearLayers();
-  const routes = state.routes;
+  state.redrawingMap = true;
+  state.routeLayer.clearLayers(); state.pointLayer.clearLayers(); state.pumpLayer.clearLayers();
+  state.pumpMarkers = new Map();
+  const planning = state.view === "planner", routes = planning ? state.routes : [];
+  if (state.connectorLayer) {
+    if (planning && !state.map.hasLayer(state.connectorLayer)) state.connectorLayer.addTo(state.map);
+    else if (!planning) state.map.removeLayer(state.connectorLayer);
+  }
   routes.forEach((r, i) => {
-    const selected = state.selected.has(r.id);
-    L.polyline(r.points, {
-      color: colours[i % colours.length],
-      weight: selected ? 5 : 3,
-      opacity: selected ? 0.9 : 0.3,
-    })
-      .addTo(state.routeLayer)
-      .on("click", () => {
-        state.selected.has(r.id)
-          ? state.selected.delete(r.id)
-          : state.selected.add(r.id);
-        renderRouteCards();
-        drawMap();
+    L.polyline(r.points, { color: colours[i % colours.length], weight: state.selected.has(r.id) ? 5 : 3, opacity: state.selected.has(r.id) ? .9 : .3 })
+      .addTo(state.routeLayer).on("click", () => {
+        state.selected.has(r.id) ? state.selected.delete(r.id) : state.selected.add(r.id);
+        renderRouteCards(); drawMap();
       });
   });
   if (routes.length) {
     const r = routes[0];
-    for (const [p, label] of [
-      [r.points[0], "A"],
-      [r.points.at(-1), "B"],
-    ])
-      L.marker([p.lat, p.lng], {
-        icon: L.divIcon({
-          className: "",
-          html: `<span class="point-label">${label}</span>`,
-          iconSize: [28, 28],
-          iconAnchor: [14, 14],
-        }),
-      }).addTo(state.pointLayer);
+    for (const [p, label] of [[r.points[0], "A"], [r.points.at(-1), "B"]])
+      L.marker([p.lat, p.lng], { icon: L.divIcon({ className: "", html: `<span class="point-label">${label}</span>`, iconSize: [28,28], iconAnchor: [14,14] }) }).addTo(state.pointLayer);
   }
-  const nearby = routes
-    .filter((r) => state.selected.has(r.id))
-    .flatMap(
-      (r) =>
-        r.candidates ||
-        routeCandidates(r, currentPumps(), Number($("corridor").value)),
-    );
-  const pumps =
-    state.view === "pumps"
-      ? visiblePumps()
-      : routes.length
-        ? [...new Map(nearby.map((p) => [p.pumpId, p])).values()]
-        : currentPumps();
-  const prices = pumps.map((p) => p.price),
-    min = prices.reduce((a, b) => Math.min(a, b), Infinity),
-    max = prices.reduce((a, b) => Math.max(a, b), -Infinity);
-  const picked = new Set(
-    state.plans
-      .filter((p) => p.status === "optimal")
-      .flatMap((p) => p.stops.map((s) => s.pumpId || s.id)),
-  );
+  const nearby = routes.filter((r) => state.selected.has(r.id)).flatMap((r) => r.candidates || routeCandidates(r, currentPumps(), Number($("corridor").value)));
+  const pumps = state.view === "fleet" ? [] : state.view === "pumps" ? pumpsOnMap() : routes.length ? [...new Map(nearby.map((p) => [p.pumpId, p])).values()] : currentPumps();
+  state.displayedPumps = pumps;
+  const prices = pumps.map((p) => p.price), min = prices.reduce((a,b) => Math.min(a,b), Infinity), max = prices.reduce((a,b) => Math.max(a,b), -Infinity);
+  const picked = new Set(planning ? state.plans.filter((p) => p.status === "optimal").flatMap((p) => p.stops.map((s) => s.pumpId || s.id)) : []);
   for (const p of pumps) {
-    const recommended = picked.has(p.pumpId || p.id),
-      ratio = max > min ? (p.price - min) / (max - min) : 0.5;
-    const colour = recommended
-      ? "#2457da"
-      : state.heat
-        ? `hsl(${145 - ratio * 145} 60% 42%)`
-        : "#4d927b";
-    const marker = L.circleMarker([p.lat, p.lng], {
-      radius: recommended ? 8 : 5,
-      weight: recommended ? 3 : 1.2,
-      color: recommended ? "#fff" : "#fff",
-      fillColor: colour,
-      fillOpacity: recommended ? 1 : 0.85,
-    })
-      .bindPopup(popup(p))
-      .addTo(state.pumpLayer);
-    if (recommended)
-      marker.bindTooltip(`$${p.price.toFixed(3)}`, {
-        permanent: true,
-        direction: "top",
-        className: "pump-label recommended",
-      });
-    marker.on("click", () => {
-      state.focusedPump = p;
-      $$("[data-pump-row]").forEach((row) => {
-        const selected = row.dataset.pumpRow === (p.pumpId || p.id);
-        row.classList.toggle("focused-pump", selected);
-        if (selected && state.view === "pumps")
-          row.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      });
-    });
+    const id = p.pumpId || p.id, recommended = picked.has(id), focused = state.view === "pumps" && state.focusedPump?.id === id;
+    const ratio = max > min ? (p.price - min)/(max - min) : .5;
+    const colour = recommended ? "#2457da" : state.heat ? `hsl(${145 - ratio * 145} 60% 42%)` : "#4d927b";
+    const marker = L.circleMarker([p.lat, p.lng], { radius: recommended || focused ? 8 : 5, weight: recommended || focused ? 3 : 1.2, color: focused ? "#142d53" : "#fff", fillColor: colour, fillOpacity: .9 })
+      .bindPopup(popup(p)).bindTooltip(popup(p), { direction: "top", className: "stop-tooltip", sticky: true }).addTo(state.pumpLayer);
+    state.pumpMarkers.set(id, marker);
+    marker.on("click", () => focusPump(id, true));
+    marker.on("popupclose", () => { if (!state.redrawingMap && state.openStopId === id) state.openStopId = null; });
   }
-  if (state.view === "fleet") {
-    state.pumpLayer.clearLayers();
-    state.routeLayer.clearLayers();
-    state.pointLayer.clearLayers();
-  }
+  $("heatBtn").hidden = state.view === "fleet";
   $("heatBtn").classList.toggle("active", state.heat);
   $("heatBtn").setAttribute("aria-pressed", String(state.heat));
-  $("priceLegend").hidden = !state.heat || !pumps.length;
-  if (pumps.length)
-    $("priceLegend").innerHTML =
-      `Price / gal<div class="ramp"></div>${money(min)} — ${money(max)}`;
-  $("mapCaption").textContent = routes.length
-    ? `${routes.length} route${routes.length === 1 ? "" : "s"} · ${pumps.length} nearby pumps · ${state.fuel?.source || "load fuel data"}`
-    : pumps.length
-      ? `${pumps.length} pumps · ${state.fuel.source}`
-      : "Route first. Fuel stops next.";
+  $("priceLegend").hidden = state.view === "fleet" || !state.heat || !pumps.length;
+  if (pumps.length) $("priceLegend").innerHTML = `Price / gal<div class="ramp"></div>${money(min)} — ${money(max)}`;
+  $("mapCaption").hidden = state.view === "fleet";
+  $("mapCaption").textContent = routes.length ? `${routes.length} routes · ${pumps.length} nearby stops · ${state.fuel?.source || "load fuel data"}` : `${pumps.length} stops · ${state.fuel?.source || "No fuel data loaded"}`;
   drawTruck();
+  if (state.openStopId) state.pumpMarkers.get(state.openStopId)?.openPopup?.();
+  state.redrawingMap = false;
+}
+function vehiclePopup(raw) {
+  const v = displayedVehicle(raw);
+  return `<div class="map-details"><strong>${h(v.name)}</strong><br>${h(v.location || "Location not supplied")}<br>${number(v.speed) === null ? "— MPH" : fmt(number(v.speed), 0) + " MPH"}<br>Fuel: ${number(v.fuelPercent) === null ? "—" : fmt(number(v.fuelPercent), 0) + "%"} | MPG: ${number(v.mpg) === null ? "—" : fmt(number(v.mpg), 2)}${v.fuelSource === "history" ? "<br><small>Fuel from last available history" + (v.fuelTime ? " · " + h(new Date(v.fuelTime).toLocaleString()) : "") + "</small>" : ""}</div>`;
+}
+function fleetRows() {
+  const q = $("fleetSearch").value.toLowerCase().trim();
+  return activeVehicles(state.vehicles).filter((v) => `${v.name} ${v.vin || ""} ${v.location || ""}`.toLowerCase().includes(q));
 }
 function drawTruck() {
   if (!state.truckLayer) return;
-  state.truckLayer.clearLayers();
-  const list =
-    state.view === "fleet"
-      ? state.vehicles
-      : state.vehicle
-        ? [state.vehicle]
-        : [];
+  const kind = state.view === "fleet" ? "rocket" : "ufo";
+  if (!state.truckMarkers || state.truckKind !== kind || state.truckClient !== state.client) { state.truckLayer.clearLayers(); state.truckMarkers = new Map(); state.truckKind = kind; state.truckClient = state.client; }
+  const list = state.view === "fleet" ? fleetRows() : state.view === "planner" ? activeVehicles(state.vehicles) : [];
+  const ids = new Set(list.filter((v) => number(v.lat) !== null && number(v.lng) !== null).map((v) => v.id));
+  for (const [id, marker] of state.truckMarkers) if (!ids.has(id)) { state.truckLayer.removeLayer?.(marker); state.truckMarkers.delete(id); }
   for (const v of list) {
-    if (number(v.lat) === null || number(v.lng) === null) continue;
-    L.marker([v.lat, v.lng], {
-      icon: L.divIcon({
-        className: "",
-        html: '<span class="point-label">↑</span>',
-        iconSize: [28, 28],
-        iconAnchor: [14, 14],
-      }),
-    })
-      .bindPopup(
-        h(v.name) +
-          "<br>" +
-          h(v.location || "") +
-          "<br>Fuel: " +
-          (v.fuelPercent == null ? "—" : h(v.fuelPercent) + "%"),
-      )
-      .addTo(state.truckLayer);
+    if (!ids.has(v.id)) continue;
+    const icon = L.divIcon({ className: "vehicle-marker", html: vehicleIconHTML(v, kind, state.view === "fleet" ? state.focusedTruck === v.id : state.vehicle?.id === v.id), iconSize: kind === "rocket" ? [44,44] : [30,30], iconAnchor: kind === "rocket" ? [22,22] : [15,15] });
+    let marker = state.truckMarkers.get(v.id);
+    if (marker) {
+      marker.setLatLng([v.lat,v.lng]); marker.setIcon?.(icon);
+      marker.setPopupContent?.(vehiclePopup(v)); marker.setTooltipContent?.(vehiclePopup(v));
+    } else {
+      marker = L.marker([v.lat,v.lng], { icon, title: v.name, keyboard: true })
+        .bindPopup(vehiclePopup(v)).bindTooltip(vehiclePopup(v), { direction: "top", className: "vehicle-tooltip" }).addTo(state.truckLayer);
+      marker.on("click", () => {
+        if (state.view === "fleet") focusTruck(v.id);
+        // Planner markers are information-only: never change the selected trip truck.
+        else { const current = state.vehicles.find((item) => item.id === v.id); if (current) void fetchVehicleDetail(current); }
+      });
+      marker.on("mouseover", () => { const current = state.vehicles.find((item) => item.id === v.id); if (current) void fetchVehicleDetail(current); });
+      state.truckMarkers.set(v.id, marker);
+    }
   }
 }
-function renderFleet() {
-  const q = $("fleetSearch").value.toLowerCase().trim();
-  const rows = state.vehicles.filter((v) =>
-    `${v.name} ${v.vin} ${v.location}`.toLowerCase().includes(q),
-  );
-  $("fleetCount").textContent =
-    `${rows.length} of ${state.vehicles.length} trucks · ${$("client").selectedOptions[0]?.textContent || "Manual mode"}`;
-  $("fleetRows").innerHTML = rows
-    .map(
-      (v) =>
-        `<tr><td><strong>${h(v.name)}</strong><small>${h(v.vin || "")}</small></td><td>${h(v.location || "Not supplied")}</td><td>${v.fuelPercent == null ? "—" : fmt(v.fuelPercent, 1) + "%"}</td><td>${v.speed == null ? "—" : fmt(v.speed, 0) + " mph"}</td><td>${v.odometer == null ? "—" : fmt(v.odometer, 0) + " mi"}</td><td>${v.gpsTime ? h(new Date(v.gpsTime).toLocaleString()) : "Not supplied"}</td><td><button class="secondary" data-fleet-truck="${h(v.id)}">Plan trip</button></td></tr>`,
-    )
-    .join("");
-  $$("[data-fleet-truck]").forEach(
-    (b) =>
-      (b.onclick = action(async () => {
-        const v = state.vehicles.find((v) => v.id === b.dataset.fleetTruck);
-        $("truck").value = vehicleLabel(v);
-        await chooseTruck();
-        setView("planner");
-      })),
-  );
+function focusTruck(id) {
+  const v = activeVehicles(state.vehicles).find((v) => v.id === id);
+  if (!v) return;
+  state.focusedTruck = id; renderFleet(); drawTruck();
+  if (number(v.lat) !== null && number(v.lng) !== null && state.map) {
+    const zoom = Math.max(10, state.map.getZoom?.() || 4);
+    if (state.map.flyTo) state.map.flyTo([v.lat,v.lng], zoom); else state.map.setView([v.lat,v.lng], zoom);
+    state.truckMarkers.get(id)?.openPopup?.();
+  } else toast("This truck has no current GPS coordinates.");
+  void fetchVehicleDetail(v);
 }
-
+function renderFleet() {
+  const rows = fleetRows();
+  $("fleetCount").textContent = `${rows.length} of ${activeVehicles(state.vehicles).length} trucks · ${$("client").selectedOptions[0]?.textContent || "Manual mode"}`;
+  $("fleetRows").innerHTML = rows.map((raw) => {
+    const v = displayedVehicle(raw);
+    return `<tr tabindex="0" role="button" data-fleet-row="${h(v.id)}" aria-label="Locate ${h(v.name)}" class="${state.focusedTruck === v.id ? "focused-truck" : ""}"><td class="fleet-name"><strong>${h(v.name)}</strong></td><td class="fleet-location">${h(v.location || "Location not supplied")}</td><td><small>FUEL</small>${number(v.fuelPercent) === null ? "—" : fmt(number(v.fuelPercent), 0) + "%"}${v.fuelSource === "history" ? '<small title="' + h(v.fuelTime || "") + '">history fallback</small>' : ""}</td><td><small>MPG</small>${number(v.mpg) === null ? "—" : fmt(number(v.mpg), 2)}</td><td><small>SPEED</small>${number(v.speed) === null ? "—" : fmt(number(v.speed), 0) + " MPH"}</td><td class="fleet-odo"><small>ODOMETER</small>${number(v.odometer) === null ? "—" : fmt(number(v.odometer), 0) + " mi"}</td><td class="fleet-time"><small>GPS</small>${v.gpsTime ? h(new Date(v.gpsTime).toLocaleString()) : "Not supplied"}</td></tr>`;
+  }).join("") || '<tr><td colspan="7" class="empty-list">No active trucks match this view.</td></tr>';
+  $$("[data-fleet-row]").forEach((row) => {
+    row.onclick = () => focusTruck(row.dataset.fleetRow);
+    row.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); focusTruck(row.dataset.fleetRow); } };
+  });
+}
 function fitMap() {
   if (!state.map) return;
-  const points =
-    state.view === "fleet"
-      ? state.vehicles.filter(
-          (v) => number(v.lat) !== null && number(v.lng) !== null,
-        )
-      : state.routes.length
-        ? state.routes
-            .filter((r) => state.selected.has(r.id))
-            .flatMap((r) => r.points)
-        : visiblePumps();
-  if (points.length)
-    state.map.fitBounds(L.latLngBounds(points.map((p) => [p.lat, p.lng])), {
-      padding: [35, 65],
-      maxZoom: 12,
-    });
-  else state.map.setView([38, -97], 4);
+  const points = state.view === "fleet" ? fleetRows().filter((v) => number(v.lat) !== null && number(v.lng) !== null)
+    : state.view === "pumps" ? pumpsOnMap()
+    : state.routes.length ? state.routes.filter((r) => state.selected.has(r.id)).flatMap((r) => r.points) : currentPumps();
+  if (points.length) state.map.fitBounds(L.latLngBounds(points.map((p) => [p.lat,p.lng])), { padding: [35,65], maxZoom: 12 });
+  else state.map.setView([38,-97],4);
 }
-function focusPump(id) {
-  const p = currentPumps().find((p) => p.id === id);
+function focusPump(id, fromMarker = false) {
+  const p = currentPumps().find((p) => p.id === id) || state.displayedPumps?.find((p) => (p.pumpId || p.id) === id);
   if (!p) return;
-  state.focusedPump = p;
-  $$("[data-pump-row]").forEach((row) =>
-    row.classList.toggle("focused-pump", row.dataset.pumpRow === id),
-  );
+  if (fromMarker && state.view === "pumps" && !state.highways.size && !visiblePumps().some((row) => row.id === id)) {
+    $("pumpSearch").value = ""; $("stateFilter").value = "";
+  }
+  state.focusedPump = { ...p, id }; state.openStopId = id;
+  persist();
+  if (state.view === "pumps") renderPumps();
+  $$("[data-pump-row]").forEach((row) => row.classList.toggle("focused-pump", row.dataset.pumpRow === id));
+  if (state.view === "pumps") for (const [markerId, marker] of state.pumpMarkers || []) marker.setStyle?.({ radius: markerId === id ? 8 : 5, weight: markerId === id ? 3 : 1.2, color: markerId === id ? "#142d53" : "#fff" });
   if (!state.map) return;
-  state.map.setView([p.lat, p.lng], 13);
-  L.popup().setLatLng([p.lat, p.lng]).setContent(popup(p)).openOn(state.map);
-  $("mapShell").scrollIntoView({ behavior: "smooth", block: "start" });
+  const zoom = Math.max(8, state.map.getZoom?.() || 4);
+  if (state.map.flyTo) state.map.flyTo([p.lat,p.lng], zoom); else state.map.setView([p.lat,p.lng], zoom);
+  const marker = state.pumpMarkers?.get(id);
+  if (marker?.openPopup) marker.openPopup();
+  else L.popup().setLatLng([p.lat,p.lng]).setContent(popup(p)).openOn(state.map);
+  // Deliberately do not scroll the table or the document on selection.
 }
 function renderPumps() {
-  const old = $("stateFilter").value;
-  const states = [
-    ...new Set(
-      currentPumps()
-        .map((p) => p.state)
-        .filter(Boolean),
-    ),
-  ].sort();
-  $("stateFilter").innerHTML =
-    '<option value="">All states</option>' +
-    states.map((s) => `<option>${h(s)}</option>`).join("");
-  $("stateFilter").value = old;
+  const old = $("stateFilter").value || state.pendingStopState, states = [...new Set(currentPumps().map((p) => p.state).filter(Boolean))].sort();
+  $("stateFilter").innerHTML = '<option value="">All</option>' + states.map((s) => `<option>${h(s)}</option>`).join("");
+  $("stateFilter").value = states.includes(old) ? old : "";
+  if (currentPumps().length) state.pendingStopState = "";
   const rows = visiblePumps();
-  $("pumpCount").textContent =
-    `${rows.length} of ${currentPumps().length} pumps · ${state.fuel?.source || "No data loaded"}`;
-  $("pumpRows").innerHTML = rows
-    .map(
-      (p) =>
-        `<tr data-pump-row="${h(p.id)}" class="${state.focusedPump?.id === p.id ? "focused-pump" : ""}"><td><strong>${h(p.name)}</strong><small>${h(p.brand)}</small></td><td>${h(p.location || [p.city, p.state].filter(Boolean).join(", "))}</td><td>${h(p.highway || "—")}${p.exit ? `<small>Exit ${h(p.exit)}</small>` : ""}</td><td class="price">$${p.price.toFixed(4)}</td><td><button class="text-button" data-focus="${h(p.id)}">View</button><button class="text-button" data-message-pump="${h(p.id)}">Message</button></td></tr>`,
-    )
-    .join("");
-  $$("[data-focus]").forEach(
-    (b) => (b.onclick = () => focusPump(b.dataset.focus)),
-  );
-  $$("[data-message-pump]").forEach(
-    (b) =>
-      (b.onclick = () => {
-        state.messageRows = null;
-        state.pairs.push({ a: b.dataset.messagePump, b: "" });
-        state.pairs = state.pairs.filter((p) => p.a);
-        setView("messages");
-      }),
-  );
+  $("pumpCount").textContent = `${rows.length} of ${currentPumps().length} stops · ${state.fuel?.source || "No data loaded"}`;
+  $("pumpRows").innerHTML = rows.map((p) => `<tr tabindex="0" data-pump-row="${h(p.id)}" class="${state.focusedPump?.id === p.id ? "focused-pump" : ""}"><td><strong>${h(p.name)}</strong></td><td>${h(p.location || [p.city,p.state].filter(Boolean).join(", "))}</td><td>${h(p.highway || "—")}${p.exit ? `<small>Exit ${h(p.exit)}</small>` : ""}</td><td class="price">$${p.price.toFixed(4)}</td><td><button class="text-button" data-message-pump="${h(p.id)}" aria-label="Add ${h(p.name)} to a driver message">Message</button></td></tr>`).join("") || '<tr><td colspan="5" class="empty-list">No stops match these filters.</td></tr>';
+  $$("[data-pump-row]").forEach((row) => {
+    row.onclick = (e) => { if (!e.target.closest("button")) focusPump(row.dataset.pumpRow); };
+    row.onkeydown = (e) => { if (e.target === row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); focusPump(row.dataset.pumpRow); } };
+  });
+  $$("[data-message-pump]").forEach((b) => b.onclick = () => {
+    const stop = currentPumps().find((p) => p.id === b.dataset.messagePump);
+    const editor = state.messageEditor;
+    editor.pairs = editor.pairs.filter((p) => p.a.text || p.b.text);
+    editor.pairs.push({ a: { text: stopNumber(stop) || stop.name, record: { ...stop, store: stopNumber(stop) }, manual: false }, b: { text: "", record: null, manual: false } });
+    editor.renderPairs();
+    setView("messages");
+  });
   const counts = new Map();
-  currentPumps().forEach((p) =>
-    p.highways.forEach((hw) => counts.set(hw, (counts.get(hw) || 0) + 1)),
-  );
+  currentPumps().forEach((p) => (p.highways || []).forEach((hw) => counts.set(hw, (counts.get(hw) || 0) + 1)));
   const search = $("highwaySearch").value.toUpperCase();
-  $("highwayOptions").innerHTML = [...counts]
-    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
-    .filter(([hw]) => hw.includes(search))
-    .map(
-      ([hw, count]) =>
-        `<label><input type="checkbox" data-highway="${h(hw)}" ${state.highways.has(hw) ? "checked" : ""}>${h(hw)} <span class="muted">${count}</span></label>`,
-    )
-    .join("");
-  $("highwayCount").textContent = state.highways.size
-    ? `· ${state.highways.size} selected`
-    : "";
-  $$("[data-highway]").forEach(
-    (el) =>
-      (el.onchange = () => {
-        el.checked
-          ? state.highways.add(el.dataset.highway)
-          : state.highways.delete(el.dataset.highway);
-        renderPumps();
-        drawMap();
-      }),
-  );
+  $("highwayOptions").innerHTML = [...counts].sort((a,b) => a[0].localeCompare(b[0], undefined, { numeric: true })).filter(([hw]) => hw.includes(search)).map(([hw,count]) =>
+    `<label><input type="checkbox" data-highway="${h(hw)}" ${state.highways.has(hw) ? "checked" : ""}>${h(hw)} <span class="muted">${count}</span></label>`).join("") || '<p class="small muted">No highways match.</p>';
+  $("highwayCount").textContent = state.highways.size ? `· ${state.highways.size} selected` : "";
+  $$("[data-highway]").forEach((el) => el.onchange = () => {
+    el.checked ? state.highways.add(el.dataset.highway) : state.highways.delete(el.dataset.highway);
+    renderPumps(); drawMap(); persist();
+  });
+  $("priceHeading").setAttribute("aria-sort", $("priceSort").value === "high" ? "descending" : $("priceSort").value === "low" ? "ascending" : "none");
+  $("priceDirection").textContent = $("priceSort").value === "high" ? "↓" : $("priceSort").value === "low" ? "↑" : "↕";
 }
 
 async function geocode(text) {
@@ -1092,25 +1051,49 @@ async function geocode(text) {
     );
   return result.results;
 }
-async function searchPlace(field) {
-  const results = await geocode($(field).value);
-  const box = $(field + "Suggestions");
-  box.hidden = false;
-  box.innerHTML = results
-    .map((r, i) => `<button data-place="${i}">${h(r.label)}</button>`)
-    .join("");
-  box.querySelectorAll("button").forEach(
-    (b) =>
-      (b.onclick = () => {
-        const place = results[Number(b.dataset.place)];
-        $(field).value = place.label;
-        $(field).dataset.coordinates = JSON.stringify(place);
-        $(field).dataset.selectedLabel = place.label;
-        box.hidden = true;
-        if (field === "origin") markManual("origin", place.label);
-        persist();
-      }),
-  );
+const placeControls = new Map();
+function bindLocation(field, onSelect, onChange = () => {}) {
+  const el = $(field), box = $(field + "Suggestions");
+  const control = bindPlaceSearch(el, box, {
+    suggest: async (q, signal) => (await api("suggest?q=" + encodeURIComponent(q), undefined, signal)).results,
+    submit: async (q) => geocode(q),
+    coordinates: parseCoordinates,
+    select: (place) => { onSelect?.(place); persist(); updateRouteStatus(); },
+    changed: () => { onChange(); updateRouteStatus(); },
+  });
+  placeControls.set(field, control);
+}
+async function searchPlace(field) { return placeControls.get(field)?.search(true); }
+function syncWaypoints() {
+  $("waypoints").value = state.waypointItems.map((p) => p.value).filter((v) => v.trim()).join("\n");
+  $("waypointCount").textContent = state.waypointItems.length ? String(state.waypointItems.length) : "";
+  updateRouteStatus(); persist();
+}
+function restoreWaypoints() {
+  state.waypointItems = $("waypoints").value.split("\n").filter((v) => v.trim()).map((value) => ({ id: crypto.randomUUID(), value }));
+  renderWaypoints();
+}
+function renderWaypoints() {
+  for (const [key, control] of placeControls) if (key.startsWith("via-")) { control.close(); placeControls.delete(key); }
+  $("waypointRows").innerHTML = state.waypointItems.map((item, i) => {
+    const id = "via-" + item.id;
+    return `<div class="waypoint-row"><div class="section-heading"><label for="${id}">Waypoint ${i+1}</label><div class="waypoint-actions"><button data-via-up="${i}" class="text-button" ${!i ? "disabled" : ""} aria-label="Move waypoint ${i+1} up">↑</button><button data-via-down="${i}" class="text-button" ${i === state.waypointItems.length-1 ? "disabled" : ""} aria-label="Move waypoint ${i+1} down">↓</button><button data-via-remove="${i}" class="text-button" aria-label="Remove waypoint ${i+1}">×</button></div></div><div class="location-wrap"><input id="${id}" autocomplete="off" placeholder="City, state or latitude, longitude" value="${h(item.value)}"><button data-via-search="${id}" class="search-place" aria-label="Search waypoint ${i+1}">⌕</button></div><div id="${id}Suggestions" class="suggestions" hidden></div></div>`;
+  }).join("");
+  state.waypointItems.forEach((item) => {
+    const field = "via-" + item.id;
+    if (item.place) { $(field).dataset.selectedLabel = item.value; $(field).dataset.coordinates = JSON.stringify(item.place); }
+    bindLocation(field, (place) => { item.value = $(field).value; item.place = place; syncWaypoints(); },
+      () => { item.value = $(field).value; delete item.place; syncWaypoints(); });
+  });
+  $$("[data-via-search]").forEach((b) => b.onclick = () => searchPlace(b.dataset.viaSearch));
+  for (const kind of ["up", "down", "remove"]) $$(`[data-via-${kind}]`).forEach((b) => b.onclick = () => {
+    const i = Number(b.getAttribute(`data-via-${kind}`));
+    if (kind === "remove") state.waypointItems.splice(i,1);
+    else { const j = i + (kind === "up" ? -1 : 1); if (j < 0 || j >= state.waypointItems.length) return; [state.waypointItems[i],state.waypointItems[j]] = [state.waypointItems[j],state.waypointItems[i]]; }
+    renderWaypoints(); syncWaypoints();
+  });
+  $("addWaypoint").disabled = state.waypointItems.length >= 23;
+  $("waypointCount").textContent = state.waypointItems.length ? String(state.waypointItems.length) : "";
 }
 async function resolveField(field) {
   const el = $(field);
@@ -1127,6 +1110,7 @@ async function findRoutes() {
   if (!originText || !destText)
     throw new Error("Enter both an origin and a destination.");
   const stamp = tripStamp();
+  const sequence = ++state.findSeq;
   $("findRoutes").textContent = "Finding roads…";
   try {
     const origin = await resolveField("origin"),
@@ -1138,7 +1122,11 @@ async function findRoutes() {
     if (waypoints.length > 23)
       throw new Error("Use no more than 23 waypoints per route.");
     const via = [];
-    for (const text of waypoints) via.push((await geocode(text))[0]);
+    const waypointSnapshot = state.waypointItems.filter((item) => item.value.trim());
+    for (const [i, text] of waypoints.entries()) {
+      const selected = waypointSnapshot[i];
+      via.push(selected?.value === text && selected.place ? selected.place : (await geocode(text))[0]);
+    }
     const profile = $("routingProfile").value,
       options = routeOptions();
     const result = await api("routes", {
@@ -1147,6 +1135,8 @@ async function findRoutes() {
       options,
     });
     if (!result.routes.length) throw new Error("No routes were returned.");
+    if (sequence !== state.findSeq || stamp !== tripStamp())
+      throw new Error("Truck or locations changed during the search. Find routes again for the current trip.");
     state.routes = result.routes.map((r, i) =>
       prepareRoute({
         ...r,
@@ -1176,6 +1166,7 @@ async function findRoutes() {
     persist();
   } finally {
     $("findRoutes").innerHTML = "Find routes <span>→</span>";
+    updateRouteStatus();
   }
 }
 function renderRouteCards() {
@@ -1208,8 +1199,8 @@ function renderRouteCards() {
   });
   $("solveBar").hidden = false;
   $("solveRoutes").disabled = !state.selected.size;
-  $("solveRoutes").textContent =
-    `Find cheapest fuel plan${state.selected.size > 1 ? ` · ${state.selected.size} routes` : ""}`;
+  $("solveRoutes").textContent = "Fuelio Hunt";
+  updateRouteStatus();
 }
 function showProgress(message, percent) {
   $("progress").hidden = false;
@@ -1399,7 +1390,7 @@ async function solveSelected() {
         controller.signal,
         (done, total) =>
           showProgress(
-            `${route.name} · checked ${done} of ${total} pump connections`,
+            `${route.name} · checked ${done} of ${total} stop connections`,
             ((i + (total ? done / total : 1)) / routes.length) * 100,
           ),
         fuelSnapshot,
@@ -1419,12 +1410,13 @@ async function solveSelected() {
       for (const p of good) state.history.unshift(p);
       state.history = state.history.slice(0, 30);
       await dbPut("history", state.history);
-      $("results").scrollIntoView({ behavior: "smooth", block: "start" });
+      $("plannerContent").scrollTo?.({ top: $("results").offsetTop - $("plannerContent").offsetTop, behavior: "smooth" });
     }
   } finally {
     state.activeSolve = null;
     $("progress").hidden = true;
     $("solveRoutes").disabled = false;
+    updateRouteStatus();
   }
 }
 function fuelChart(plan) {
@@ -1453,23 +1445,11 @@ function renderResults() {
   $("results").innerHTML = plans
     .map((p) => {
       if (p.status !== "optimal")
-        return `<article class="infeasible"><h3>${h(p.route.name)} · No feasible plan</h3><p>${h(p.reason)}</p>${p.rules?.fill === "half" || $("fill").value === "half" ? '<button class="secondary" data-full-tank>Use Full Tank</button>' : ""}</article>`;
-      return `<article class="plan-result ${p === best ? "best" : ""}"><div class="result-top"><div><span class="tag ${p === best ? "good" : ""}">${p === best ? "LOWEST FUEL SPEND" : "FEASIBLE PLAN"}</span><h2>${h(p.route.name)} · ${h(p.trip.truck || "Manual trip")}</h2><p class="stop-note">${h(p.source)} · ${p.rules.fill === "half" ? "Half Tank" : "Full Tank"} · ${h(new Date(p.createdAt).toLocaleString())}</p></div><div class="result-cost">${money(p.cost)}<small>fuel to purchase</small></div></div><div class="result-metrics"><div><strong>${fmt(p.totalMiles, 1)} mi</strong><span>Including pump access</span></div><div><strong>${fmt(p.gallons, 2)} gal</strong><span>Fuel to buy</span></div><div><strong>${p.stops.length} stops</strong><span>${fmt(p.detourMiles, 1)} extra miles</span></div><div><strong>${fmt(p.endFuel, 2)} gal</strong><span>At destination</span></div></div>${p.warnings.map((w) => `<p class="callout">${h(w)}</p>`).join("")}${p.excludedPumps ? `<p class="callout">${p.excludedPumps} pumps had no confirmed road access and were excluded.</p>` : ""}<div class="stop-list">${p.stops.length ? p.stops.map((s, i) => `<div class="stop-row"><span class="stop-number">${i + 1}</span><div><button class="text-button stop-name" data-stop="${h(p.id)}:${i}">${h(s.name)}</button><p class="stop-location">${h(s.location || [s.city, s.state].filter(Boolean).join(", "))}</p><p class="stop-note">${h(s.highway || "")}${s.exit ? " · Exit " + h(s.exit) : ""} · Route mile ${fmt(s.mile, 1)}</p></div><div class="fuel-flow"><span><small>ARRIVE</small>${fmt(s.arrival, 2)}</span><span class="muted">→</span><span class="purchase"><small>BUY · GAL</small>+${fmt(s.gallons, 2)}</span><span class="muted">→</span><span><small>LEAVE</small>${fmt(s.departure, 2)}</span></div><div class="stop-price">${money(s.cost)}<small>$${s.price.toFixed(4)} / gal</small></div></div>`).join("") : '<p style="padding:20px 0">No fuel purchase is needed. The entered starting fuel covers this trip and its reserve.</p>'}</div><div class="fuel-chart"><details><summary>Fuel profile &amp; calculation details</summary>${fuelChart(p)}<p class="field-help">${fmt(p.rules.startFuel, 2)} starting + ${fmt(p.gallons, 2)} purchased − ${fmt(p.burned, 2)} consumed = ${fmt(p.endFuel, 2)} ending gallons. Exact minimum for the supplied routes, prices and fixed-fill rules. Initial fuel is already on hand; remaining fuel is shown separately. Road access uses return-to-route connectors. ${h(p.route.provider)}.</p></details></div><div class="result-actions"><button class="secondary" data-export-csv="${p.id}">Export CSV</button><button class="secondary" data-export-json="${p.id}">Export JSON</button><button class="quiet" data-plan-map="${p.id}">Show on map</button><button class="quiet" data-plan-message="${p.id}">Preview message</button><button class="primary" data-copy-plan="${p.id}">Copy driver message</button></div></article>`;
+        return `<article class="infeasible"><h3>${h(p.route.name)} · No feasible plan</h3><p>${h(uiText(p.reason))}</p>${p.rules?.fill === "half" || $("fill").value === "half" ? '<button class="secondary" data-full-tank>Use Full Tank</button>' : ""}</article>`;
+      return `<article class="plan-result ${p === best ? "best" : ""}"><div class="result-top"><div><span class="tag ${p === best ? "good" : ""}">${p === best ? "LOWEST FUEL SPEND" : "FEASIBLE PLAN"}</span><h2>${h(p.route.name)} · ${h(p.trip.truck || "Manual trip")}</h2><p class="stop-note">${h(p.source)} · ${p.rules.fill === "half" ? "Half Tank" : "Full Tank"} · ${h(new Date(p.createdAt).toLocaleString())}</p></div><div class="result-cost">${money(p.cost)}<small>fuel to purchase</small></div></div><div class="result-metrics"><div><strong>${fmt(p.totalMiles, 1)} mi</strong><span>Including stop access</span></div><div><strong>${fmt(p.gallons, 2)} gal</strong><span>Fuel to buy</span></div><div><strong>${p.stops.length} stops</strong><span>${fmt(p.detourMiles, 1)} extra miles</span></div><div><strong>${fmt(p.endFuel, 2)} gal</strong><span>At destination</span></div></div>${p.warnings.map((w) => `<p class="callout">${h(uiText(w))}</p>`).join("")}${p.excludedPumps ? `<p class="callout">${p.excludedPumps} stops had no confirmed road access and were excluded.</p>` : ""}<div class="stop-list">${p.stops.length ? p.stops.map((s, i) => `<div class="stop-row"><span class="stop-number">${i + 1}</span><div><button class="text-button stop-name" data-stop="${h(p.id)}:${i}">${h(s.name)}</button><p class="stop-location">${h(s.location || [s.city, s.state].filter(Boolean).join(", "))}</p><p class="stop-note">${h(s.highway || "")}${s.exit ? " · Exit " + h(s.exit) : ""} · Route mile ${fmt(s.mile, 1)}</p></div><div class="fuel-flow"><span><small>ARRIVE</small>${fmt(s.arrival, 2)}</span><span class="muted">→</span><span class="purchase"><small>BUY · GAL</small>+${fmt(s.gallons, 2)}</span><span class="muted">→</span><span><small>LEAVE</small>${fmt(s.departure, 2)}</span></div><div class="stop-price">${money(s.cost)}<small>$${s.price.toFixed(4)} / gal</small></div></div>`).join("") : '<p style="padding:20px 0">No fuel purchase is needed. The entered starting fuel covers this trip and its reserve.</p>'}</div><div class="fuel-chart"><details><summary>Fuel profile &amp; calculation details</summary>${fuelChart(p)}<p class="field-help">${fmt(p.rules.startFuel, 2)} starting + ${fmt(p.gallons, 2)} purchased − ${fmt(p.burned, 2)} consumed = ${fmt(p.endFuel, 2)} ending gallons. Exact minimum for the supplied routes, prices and fixed-fill rules. Initial fuel is already on hand; remaining fuel is shown separately. Road access uses return-to-route connectors. ${h(p.route.provider)}.</p></details></div><div class="result-actions"><button class="secondary" data-export-csv="${p.id}">Export CSV</button><button class="secondary" data-export-json="${p.id}">Export JSON</button><button class="quiet" data-plan-map="${p.id}">Show on map</button><button class="primary" data-plan-message="${p.id}">Driver messages</button></div></article>`;
     })
     .join("");
-  $$("[data-copy-plan]").forEach(
-    (b) =>
-      (b.onclick = action(() => {
-        const p = plans.find((p) => p.id === b.dataset.copyPlan);
-        return copy(
-          planMessage(p, {
-            ...p.trip,
-            driver: $("resultDriver").value || $("messageDriver").value,
-            partner: $("resultPartner").value || $("messagePartner").value,
-          }),
-        );
-      })),
-  );
+
   $$("[data-plan-message]").forEach(
     (b) =>
       (b.onclick = () =>
@@ -1558,7 +1538,7 @@ function exportPlan(p, type) {
           "Master",
           "Truck",
           "Stop",
-          "Pump",
+          "Stop name",
           "City",
           "State",
           "Highway",
@@ -1631,109 +1611,46 @@ async function copy(text) {
   }
   toast("Message copied.");
 }
+function initMessageEditors() {
+  const callbacks = { api, readFile: readTableFile, copy, onError: (e) => log(e.message, "warning") };
+  state.messageEditor = new MessageEditor($("messageEditor"), {
+    ...callbacks, prefix: "message",
+    onSave: (snapshot) => {
+      if (!state.messagesReady) return;
+      clearTimeout(saveMessages.timer);
+      saveMessages.timer = setTimeout(() => dbPut("messages", snapshot), 200);
+    },
+  });
+  state.resultEditor = new MessageEditor($("resultEditor"), {
+    ...callbacks, prefix: "result", onSave: (snapshot) => {
+      if (state.planForMessage && !state.loadingPlanMessage) state.planMessageDrafts.set(state.planForMessage.id, snapshot);
+    },
+  });
+}
 function openPlanMessage(plan) {
+  verifyPlan(plan);
   state.planForMessage = plan;
-  updateResultMessage();
+  state.loadingPlanMessage = true;
+  const saved = state.messageEditor.snapshot();
+  state.resultEditor.setFallback(currentPumps(), state.fuel?.source);
+  const draft = state.planMessageDrafts.get(plan.id);
+  if (draft) state.resultEditor.restore(draft);
+  else {
+    state.resultEditor.restore({ ...saved, pairs: [] });
+    state.resultEditor.setPlan(plan, routeHighways(plan.route), saved.fields);
+  }
+  state.loadingPlanMessage = false;
+  state.planMessageDrafts.set(plan.id, state.resultEditor.snapshot());
   $("messageDialog").showModal();
 }
-function updateResultMessage() {
-  if (!state.planForMessage) return;
-  $("resultMessage").value = planMessage(state.planForMessage, {
-    ...state.planForMessage.trip,
-    driver: $("resultDriver").value,
-    partner: $("resultPartner").value,
-  });
-}
 function renderMessages() {
-  const rows = state.messageRows || currentPumps();
-  $("messageSource").textContent =
-    state.messageRows?.[0]?.source ||
-    state.fuel?.source ||
-    "Load a message master or fuel pumps";
-  const options =
-    '<option value="">Choose a pump</option>' +
-    rows
-      .map((p) => `<option value="${h(p.id)}">${h(pumpLine(p))}</option>`)
-      .join("");
-  $("messagePairs").innerHTML = state.pairs
-    .map(
-      (pair, i) =>
-        `<div class="message-pair"><div class="section-heading"><h3>Stop ${i + 1}</h3><button data-remove-pair="${i}" class="text-button">Remove</button></div><div class="inline"><select data-pair="${i}" data-side="a" aria-label="Stop ${i + 1} first pump">${options}</select><span>OR</span><select data-pair="${i}" data-side="b" aria-label="Stop ${i + 1} alternative pump">${options}</select></div></div>`,
-    )
-    .join("");
-  $$("[data-pair]").forEach((el) => {
-    el.value = state.pairs[Number(el.dataset.pair)][el.dataset.side];
-    el.onchange = () => {
-      state.pairs[Number(el.dataset.pair)][el.dataset.side] = el.value;
-      updateCustomMessage();
-    };
-  });
-  $$("[data-remove-pair]").forEach(
-    (el) =>
-      (el.onclick = () => {
-        state.pairs.splice(Number(el.dataset.removePair), 1);
-        renderMessages();
-      }),
-  );
-  updateCustomMessage();
+  if (!state.messageEditor) return;
+  for (const editor of [state.messageEditor, state.resultEditor]) editor.setFallback(currentPumps(), state.fuel?.source);
 }
-function saveMessages() {
-  clearTimeout(saveMessages.timer);
-  saveMessages.timer = setTimeout(
-    () =>
-      dbPut("messages", {
-        rows: state.messageRows,
-        pairs: state.pairs,
-        master: $("messageMaster").value,
-        fields: Object.fromEntries(
-          [
-            "messageDriver",
-            "messagePartner",
-            "messageRoute",
-            "messageInstruction",
-          ].map((id) => [id, $(id).value]),
-        ),
-      }),
-    200,
-  );
-}
-function messageInputs() {
-  const rows = state.messageRows || currentPumps();
-  return {
-    driver: $("messageDriver").value,
-    partner: $("messagePartner").value,
-    route: $("messageRoute").value,
-    instruction: $("messageInstruction").value,
-    pairs: state.pairs
-      .filter((p) => p.a || p.b)
-      .map((pair) => ({
-        a: rows.find((p) => p.id === pair.a),
-        b: rows.find((p) => p.id === pair.b),
-      })),
-  };
-}
-function updateCustomMessage() {
-  saveMessages();
-  try {
-    const data = messageInputs();
-    $("messagePreview").value = data.pairs.length ? customMessage(data) : "";
-    $("partnerPreview").innerHTML =
-      data.partner && data.pairs.length
-        ? `<div class="section-heading"><h3>Team driver copy</h3><button id="copyPartner" class="secondary">Copy for ${h(data.partner)}</button></div><textarea id="partnerMessage" class="message-preview" rows="7" readonly></textarea>`
-        : "";
-    if ($("partnerMessage")) {
-      $("partnerMessage").value = customMessage({
-        ...data,
-        driver: data.partner,
-        partner: data.driver,
-      });
-      $("copyPartner").onclick = action(() => copy($("partnerMessage").value));
-    }
-  } catch (e) {
-    $("messagePreview").value = e.message;
-    $("partnerPreview").innerHTML = "";
-  }
-}
+function saveMessages() { return dbPut("messages", state.messageEditor.snapshot()); }
+function messageInputs() { return state.messageEditor.inputs(); }
+function updateCustomMessage() { state.messageEditor.update(); }
+
 function renderLibrary() {
   const lanes = [...state.saved, ...(state.library || [])];
   $("savedRoutes").innerHTML = lanes
@@ -2041,6 +1958,11 @@ async function readTableFile(file) {
 
 function bindEvents() {
   $$(".nav").forEach((b) => (b.onclick = () => setView(b.dataset.view)));
+  document.querySelector(".brand").onclick = (e) => { e.preventDefault(); setView("planner"); };
+  window.addEventListener("hashchange", () => {
+    const view = location.hash.slice(1);
+    if (view !== state.view) setView(["planner", "fleet", "pumps", "stops", "messages", "activity"].includes(view) ? view : "planner");
+  });
   $("theme").onchange = () => applyTheme($("theme").value);
   $("settingsBtn").onclick = () => {
     $("settingsDialog").showModal();
@@ -2060,6 +1982,7 @@ function bindEvents() {
       renderTelemetry();
       drawTruck();
     }
+    updateRouteStatus(); persist();
   };
   $("client").onchange = action(async () => {
     state.client = $("client").value;
@@ -2075,6 +1998,7 @@ function bindEvents() {
     drawTruck();
     if (state.view === "fleet") renderFleet();
     persist();
+    updateRouteStatus();
     if (state.client) await loadFleet();
     else {
       $("connection").textContent = "Manual mode";
@@ -2114,19 +2038,33 @@ function bindEvents() {
         ).toFixed(2);
       }
       updateFuelUI(id);
+      if (id === "waypoints" && $("waypoints").value !== state.waypointItems.map((p) => p.value).filter((v) => v.trim()).join("\n")) restoreWaypoints();
+      if (["fuelPercent", "mpg", "startFuel", "capacity"].includes(id)) renderTelemetry();
+      if (id === "corridor") { state.routes.forEach((r) => delete r.candidates); drawMap(); }
+      updateRouteStatus();
       persist();
     }),
   );
   $$(".search-place").forEach(
     (b) => (b.onclick = action(() => searchPlace(b.dataset.field))),
   );
-  for (const id of ["origin", "destination"])
-    $(id).addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        action(() => searchPlace(id))(e);
-      }
-    });
+  for (const id of ["origin", "destination"]) bindLocation(id, () => {
+    if (id === "origin") markManual("origin", $(id).value);
+  });
+  document.addEventListener("pointerdown", (e) => {
+    for (const control of placeControls.values()) if (!control.contains(e.target) && !e.target.closest(".search-place")) control.close();
+    const menu = document.querySelector(".highway-filter");
+    if (menu && !menu.contains(e.target)) menu.open = false;
+  });
+  document.addEventListener("focusin", (e) => {
+    for (const control of placeControls.values()) if (!control.contains(e.target) && !e.target.closest(".search-place")) control.close();
+  });
+  $("addWaypoint").onclick = () => {
+    if (state.waypointItems.length >= 23) return;
+    state.waypointItems.push({ id: crypto.randomUUID(), value: "" });
+    renderWaypoints(); syncWaypoints();
+    $("via-" + state.waypointItems.at(-1).id).focus();
+  };
   $("streetBtn").onclick = action(() => setMapMode("map"));
   $("satelliteBtn").onclick = action(() => setMapMode("satellite"));
   $("heatBtn").onclick = () => {
@@ -2152,16 +2090,33 @@ function bindEvents() {
       () => {
         renderPumps();
         drawMap();
+        persist();
       },
     );
   $("clearHighways").onclick = () => {
     state.highways.clear();
     renderPumps();
     drawMap();
+    persist();
+  };
+  $("clearHighwaySearch").onclick = () => { $("highwaySearch").value = ""; renderPumps(); $("highwaySearch").focus(); persist(); };
+  $("cyclePrice").onclick = () => {
+    const sequence = ["master", "high", "low"];
+    $("priceSort").value = sequence[(sequence.indexOf($("priceSort").value) + 1) % 3];
+    renderPumps();
+    persist();
+  };
+  $("clearStops").onclick = () => {
+    for (const id of ["pumpSearch", "stateFilter", "highwaySearch"]) $(id).value = "";
+    $("priceSort").value = "master"; $("routeOnly").checked = false;
+    state.highways.clear(); state.focusedPump = null; state.openStopId = null;
+    state.pendingStopState = "";
+    state.map?.closePopup?.(); renderPumps(); drawMap(); fitMap();
+    persist();
   };
   $("fuelExport").onclick = () =>
     download(
-      "fco-fuel-pumps.csv",
+      "fuelio-fuel-stops.csv",
       toCSV([
         [
           "pump_name",
@@ -2190,7 +2145,7 @@ function bindEvents() {
       ]),
       "text/csv",
     );
-  $("fleetSearch").oninput = renderFleet;
+  $("fleetSearch").oninput = () => { renderFleet(); drawTruck(); };
   $("refreshFleet").onclick = action(loadFleet);
   $("saveRoute").onclick = action(saveTrip);
   $("resetTrip").onclick = () => {
@@ -2206,65 +2161,18 @@ function bindEvents() {
     state.routeStamp = null;
     for (const id of ["origin", "destination", "waypoints", "truck"])
       $(id).value = "";
+    restoreWaypoints();
     $("routeCards").innerHTML =
       '<div class="empty-state"><p>Enter your next trip and find routes.</p></div>';
     $("results").innerHTML = "";
-    $("solveBar").hidden = true;
+    $("solveBar").hidden = false;
     state.connectorLayer?.clearLayers();
     renderTelemetry();
     drawMap();
     persist();
+    updateRouteStatus();
   };
-  $("copyResultMessage").onclick = action(() => copy($("resultMessage").value));
-  for (const id of ["resultDriver", "resultPartner"])
-    $(id).oninput = updateResultMessage;
-  $("addPair").onclick = () => {
-    state.pairs.push({ a: "", b: "" });
-    renderMessages();
-  };
-  for (const id of [
-    "messageDriver",
-    "messagePartner",
-    "messageRoute",
-    "messageInstruction",
-  ])
-    $(id).oninput = updateCustomMessage;
-  $("copyCustomMessage").onclick = action(() =>
-    copy(customMessage(messageInputs())),
-  );
-  $("clearMessage").onclick = () => {
-    state.pairs = [{ a: "", b: "" }];
-    for (const id of ["messageDriver", "messagePartner", "messageRoute"])
-      $(id).value = "";
-    renderMessages();
-  };
-  $("loadMessageMaster").onclick = action(async () => {
-    const id = $("messageMaster").value;
-    if (!id) {
-      state.messageRows = null;
-    } else {
-      const r = await api("messages", { masterId: id });
-      state.messageRows = r.rows;
-    }
-    state.pairs = [{ a: "", b: "" }];
-    renderMessages();
-  });
-  $("messageUpload").onchange = action(async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    state.messageRows = parseMessageTable(await readTableFile(file), file.name);
-    state.pairs = [{ a: "", b: "" }];
-    renderMessages();
-    e.target.value = "";
-  });
-  $("messageSheetBtn").onclick = action(async () => {
-    const url = prompt("Google Sheet URL for message locations");
-    if (!url) return;
-    const r = await api("messages", { url, label: "Custom message sheet" });
-    state.messageRows = r.rows;
-    state.pairs = [{ a: "", b: "" }];
-    renderMessages();
-  });
+
   $("loadUpload").onchange = action(async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -2344,19 +2252,7 @@ function bindEvents() {
           saved: state.saved,
           history: state.history,
           loads: state.loads,
-          messages: {
-            rows: state.messageRows,
-            pairs: state.pairs,
-            master: $("messageMaster").value,
-            fields: Object.fromEntries(
-              [
-                "messageDriver",
-                "messagePartner",
-                "messageRoute",
-                "messageInstruction",
-              ].map((id) => [id, $(id).value]),
-            ),
-          },
+          messages: state.messageEditor.snapshot(),
         },
         null,
         2,
@@ -2393,9 +2289,16 @@ async function bootstrap() {
         : ($(id).value = value);
   }
   document.documentElement.dataset.theme = restored.theme || "light";
+  $("pumpSearch").value = restored.stopView?.query || "";
+  $("highwaySearch").value = restored.stopView?.highwaySearch || "";
+  $("priceSort").value = ["master","high","low"].includes(restored.stopView?.sort) ? restored.stopView.sort : "master";
   $("theme").value = restored.theme || "light";
+  initMessageEditors();
   bindEvents();
+  restoreWaypoints();
   updateFuelUI();
+  renderTelemetry();
+  updateRouteStatus();
   createMap();
   const [fuel, saved, history, loads, access, library, messages] =
     await Promise.all([
@@ -2414,17 +2317,11 @@ async function bootstrap() {
   state.loads = loads || [];
   state.accessCache = new Map(access || []);
   state.library = library;
-  if (messages) {
-    state.messageRows = messages.rows;
-    state.pairs = messages.pairs || [{ a: "", b: "" }];
-    state.messageMasterId = messages.master || "";
-    for (const [id, value] of Object.entries(messages.fields || {})) {
-      if ($(id)) $(id).value = value;
-    }
-  }
   if (fuel) await applyFuel(fuel, state.sourcePrefs);
+  if (messages) state.messageEditor.restore(messages);
+  state.messagesReady = true;
   setView(
-    ["planner", "fleet", "pumps", "library", "messages", "activity"].includes(
+    ["planner", "fleet", "pumps", "stops", "messages", "activity"].includes(
       location.hash.slice(1),
     )
       ? location.hash.slice(1)

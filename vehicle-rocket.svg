@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+ <defs><linearGradient id="h"><stop stop-color="#afbed0"/><stop offset=".48" stop-color="#fff"/><stop offset="1" stop-color="#b9c9dc"/></linearGradient><linearGradient id="r"><stop stop-color="#f37351"/><stop offset="1" stop-color="#b52120"/></linearGradient><radialGradient id="w"><stop stop-color="#6edcff"/><stop offset="1" stop-color="#0c365f"/></radialGradient></defs>
+ <path d="M27 46Q18 51 32 64Q46 51 37 46" fill="#ff982d"/><path d="M29 47Q27 54 32 60Q37 54 35 47" fill="#fff2a4"/>
+ <path d="M24 28L15 40L17 51L25 44M40 28L49 40L47 51L39 44" fill="url(#h)" stroke="#a0b4cf"/>
+ <path d="M32 2C23 14 21 33 26 47Q32 50 38 47C43 33 41 14 32 2" fill="url(#h)" stroke="#d9e8f7" stroke-width=".7"/>
+ <path d="M32 2Q26 10 24 18Q32 22 40 18Q38 10 32 2" fill="url(#r)"/>
+ <circle cx="32" cy="28" r="7" fill="#0b2845"/><circle cx="32" cy="28" r="5" fill="url(#w)" stroke="#a8cbea" stroke-width="1.2"/>
+ <path d="M27 45Q32 47 37 45L37 49Q32 51 27 49" fill="#cc421f"/><path d="M32 36L30 49H34Z" fill="#8da6c1"/>
+</svg>

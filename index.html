@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>FCO — Dispatch workspace</title>
+    <title>Fuelio — Fleet &amp; fuel planning</title>
     <meta
       name="description"
       content="Live fleet information, route comparisons and fuel planning in one dispatch workspace."
@@ -23,15 +23,14 @@
   </head>
   <body>
     <header class="topbar">
-      <a class="brand" href="#planner" aria-label="FCO planner"
-        ><span class="brand-symbol">F</span
-        ><strong>FCO<span>DISPATCH WORKSPACE</span></strong></a
+      <a class="brand" href="#planner" aria-label="Fuelio planner"
+        ><span class="fuelio-logo"><img src="/fuelio-brand.png" alt="" width="2048" height="682"></span><strong>Fuelio</strong></a
       >
       <nav aria-label="Workspace">
         <button class="nav active" data-view="planner">Plan trip</button
         ><button class="nav" data-view="fleet">Fleet</button
-        ><button class="nav" data-view="pumps">Fuel pumps</button
-        ><button class="nav" data-view="library">Routes &amp; loads</button
+        ><button class="nav" data-view="pumps">Fuel stops</button
+        ><button class="nav" data-view="library" hidden aria-hidden="true" tabindex="-1">Routes &amp; loads</button
         ><button class="nav" data-view="messages">Messages</button
         ><button class="nav" data-view="activity">Activity</button>
       </nav>
@@ -72,7 +71,7 @@
     </div>
     <div id="notice" class="notice" role="status" hidden></div>
     <main id="workspace" class="workspace" data-view="planner">
-      <aside id="tripPanel" class="trip-panel">
+      <aside id="tripPanel" class="trip-panel"><div class="trip-scroll">
         <div class="panel-heading">
           <div>
             <p class="eyebrow">TRIP DETAILS</p>
@@ -98,7 +97,7 @@
             Use live
           </button>
         </div>
-        <details id="telemetryDetails" class="telemetry" open>
+        <details id="telemetryDetails" class="telemetry" open hidden>
           <summary>
             <span id="telemetryTitle">Live information</span
             ><span id="liveTime">Waiting for a truck</span>
@@ -153,13 +152,9 @@
           <summary>
             Waypoints &amp; map selection <span id="waypointCount"></span>
           </summary>
-          <label for="waypoints">Waypoints, one per line</label
-          ><textarea
-            id="waypoints"
-            rows="3"
-            placeholder="Flagstaff, AZ&#10;Albuquerque, NM"
-          ></textarea
-          ><label for="mapClick">Set by clicking the map</label
+          <textarea id="waypoints" hidden aria-hidden="true" tabindex="-1"></textarea>
+          <div id="waypointRows"></div><button id="addWaypoint" class="secondary">+ Add waypoint</button>
+          <label for="mapClick">Set by clicking the map</label
           ><select id="mapClick">
             <option value="none">Map selection off</option>
             <option value="origin">Origin</option>
@@ -221,7 +216,7 @@
             ><input id="endFuel" type="number" min="0" step="1" value="50" />
           </div>
         </div>
-        <p id="rangeHelp" class="field-help"></p>
+        <p id="rangeHelp" class="field-help" hidden></p>
         <details class="rules-details">
           <summary>Planning rules</summary>
           <label for="mode">Refuelling rule</label
@@ -237,7 +232,7 @@
               ><input
                 id="maxStops"
                 type="number"
-                value="6"
+                value="3"
                 min="0"
                 max="1000"
                 step="1"
@@ -280,14 +275,14 @@
             Rescue keeps the minimum buffer and all other limits.
           </p>
         </details>
-        <div class="trip-actions">
+        </div><div class="trip-actions"><p id="routeInputStatus" class="small muted" role="status"></p>
           <button id="findRoutes" class="primary">
             Find routes <span>→</span></button
-          ><button id="saveRoute" class="secondary">Save trip</button>
+          ><button id="saveRoute" class="secondary" hidden aria-hidden="true" tabindex="-1">Save trip</button>
         </div>
       </aside>
       <section class="canvas-panel">
-        <div id="mapShell" class="map-shell">
+        <div id="mapDock" class="map-dock"><div id="mapShell" class="map-shell">
           <div class="map-toolbar">
             <div class="segmented">
               <button class="active" id="streetBtn">Map</button
@@ -301,12 +296,13 @@
               </button>
             </div>
           </div>
-          <div id="map" aria-label="Route and fuel pump map"></div>
+          <div id="map" aria-label="Route and fuel stop map"></div>
           <div id="mapCaption" class="map-caption">
             Route first. Fuel stops next.
           </div>
           <div id="priceLegend" class="price-legend" hidden></div>
         </div>
+        <div id="solveBar" class="solve-bar"><span id="candidateSummary" class="muted">Find routes to start your fuel hunt.</span><button id="solveRoutes" class="primary" disabled>Fuelio Hunt <span aria-hidden="true">↗</span></button></div></div>
         <div id="plannerContent">
           <div class="section-heading result-heading">
             <div>
@@ -326,12 +322,6 @@
                 </p>
               </div>
             </div>
-          </div>
-          <div id="solveBar" class="solve-bar" hidden>
-            <span id="candidateSummary" class="muted"></span
-            ><button id="solveRoutes" class="primary">
-              Find cheapest fuel plan
-            </button>
           </div>
           <div id="progress" class="progress-panel" role="status" hidden>
             <div>
@@ -367,10 +357,10 @@
                   <th>Truck</th>
                   <th>Last location</th>
                   <th>Fuel</th>
+                  <th>MPG</th>
                   <th>Speed</th>
                   <th>Odometer</th>
                   <th>GPS measured</th>
-                  <th></th>
                 </tr>
               </thead>
               <tbody id="fleetRows"></tbody>
@@ -380,7 +370,7 @@
         <section id="pumpContent" class="page-panel" hidden>
           <div class="section-heading">
             <div>
-              <p class="eyebrow">FUEL PUMPS</p>
+              <p class="eyebrow">FUEL STOPS</p>
               <h1>Know your options</h1>
             </div>
             <div>
@@ -393,26 +383,26 @@
           <div class="filterbar">
             <input
               id="pumpSearch"
-              placeholder="Search pump, city, state, highway or exit"
-              aria-label="Search fuel pumps"
+              placeholder="Search stop, city, state, highway or exit"
+              aria-label="Search fuel stops"
             /><select id="stateFilter" aria-label="Filter by state">
               <option value="">All states</option></select
-            ><select id="priceSort" aria-label="Sort pumps">
+            ><select id="priceSort" aria-label="Sort fuel stops" hidden>
               <option value="master">Master order</option>
               <option value="low">Lowest price</option>
               <option value="high">Highest price</option></select
-            ><label class="check"
+            ><label class="check" hidden
               ><input id="routeOnly" type="checkbox" />Selected routes
               only</label
             >
           </div>
-          <details class="highway-filter">
+          <button id="clearStops" class="secondary">Clear</button><details class="highway-filter">
             <summary>Highway filter <span id="highwayCount"></span></summary>
-            <input
+            <div class="inline highway-search"><input
               id="highwaySearch"
               placeholder="Find a highway"
               aria-label="Find highway"
-            />
+            /><button id="clearHighwaySearch" class="text-button" aria-label="Clear highway search text">×</button></div>
             <div id="highwayOptions" class="highway-options"></div>
             <button id="clearHighways" class="text-button">
               Clear highways
@@ -423,10 +413,10 @@
             <table>
               <thead>
                 <tr>
-                  <th>Pump</th>
+                  <th>Stop</th>
                   <th>City / state</th>
                   <th>Highway / exit</th>
-                  <th>Price / gal</th>
+                  <th id="priceHeading" aria-sort="none"><button id="cyclePrice" class="text-button">Price / gal <span id="priceDirection">↕</span></button></th>
                   <th>Actions</th>
                 </tr>
               </thead>
@@ -494,62 +484,7 @@
             </table>
           </div>
         </section>
-        <section id="messageContent" class="page-panel" hidden>
-          <div class="section-heading">
-            <div>
-              <p class="eyebrow">DRIVER MESSAGES</p>
-              <h1>Clear stops. Ready to copy.</h1>
-            </div>
-            <button id="clearMessage" class="text-button">Clear</button>
-          </div>
-          <div class="field-grid">
-            <div>
-              <label for="messageDriver">Driver</label
-              ><input id="messageDriver" placeholder="Driver name" />
-            </div>
-            <div>
-              <label for="messagePartner">Team driver</label
-              ><input id="messagePartner" placeholder="Optional" />
-            </div>
-          </div>
-          <label for="messageRoute">Route</label
-          ><input id="messageRoute" placeholder="Origin → destination" /><label
-            for="messageMaster"
-            >Message master</label
-          >
-          <div class="inline">
-            <select id="messageMaster">
-              <option value="">Use loaded fuel pumps</option></select
-            ><button id="loadMessageMaster" class="secondary">Load</button
-            ><label class="button secondary"
-              >CSV<input
-                type="file"
-                id="messageUpload"
-                accept=".csv,.tsv,.xlsx"
-                hidden /></label
-            ><button id="messageSheetBtn" class="quiet">Google Sheet</button>
-          </div>
-          <p id="messageSource" class="source-badge">Loaded fuel pumps</p>
-          <div id="messagePairs"></div>
-          <button id="addPair" class="secondary">
-            + Add fuel stop / alternative</button
-          ><label for="messageInstruction">Filling instruction</label
-          ><input
-            id="messageInstruction"
-            value="Please follow the planned fuel quantities."
-          />
-          <div class="section-heading">
-            <h2>Preview</h2>
-            <button id="copyCustomMessage" class="primary">Copy message</button>
-          </div>
-          <textarea
-            id="messagePreview"
-            class="message-preview"
-            rows="10"
-            readonly
-          ></textarea>
-          <div id="partnerPreview"></div>
-        </section>
+        <section id="messageContent" class="page-panel" hidden><div id="messageEditor"></div></section>
         <section id="activityContent" class="page-panel" hidden>
           <div class="section-heading">
             <div>
@@ -692,23 +627,7 @@
         <h2>Driver message</h2>
         <button class="icon-btn" aria-label="Close">×</button>
       </form>
-      <div class="field-grid">
-        <div>
-          <label for="resultDriver">Driver</label
-          ><input id="resultDriver" placeholder="Optional" />
-        </div>
-        <div>
-          <label for="resultPartner">Team driver</label
-          ><input id="resultPartner" placeholder="Optional" />
-        </div>
-      </div>
-      <textarea
-        id="resultMessage"
-        rows="13"
-        class="message-preview"
-        readonly
-      ></textarea
-      ><button id="copyResultMessage" class="primary">Copy message</button>
+      <div id="resultEditor"></div>
     </dialog>
     <dialog id="workbookDialog">
       <form method="dialog" class="dialog-heading">

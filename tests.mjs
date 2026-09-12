@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { solveFuelPlan, verifyPlan } from "./optimizer.js";
 import {
   parseFuelTable,
@@ -19,6 +20,32 @@ import {
 } from "./geo.js";
 import { planMessage, customMessage } from "./messages.js";
 import { clusterCities, prepareLoads, parseLoads } from "./batch.js";
+import { activeVehicles, searchStops, stopMapRows, stopNumber, mergeVehicleDetail, headingDegrees, routeHighways } from "./view-model.js";
+import { resolveMessageStop, MessageEditor } from "./message-editor.js";
+import { bindPlaceSearch } from "./place-search.js";
+
+test("Release guard: optimiser, routing maths, imports, libraries and Samsara code are unchanged", async () => {
+  const hash = (text) => createHash("sha256").update(text).digest("hex");
+  const expected = {
+    "optimizer.js": "bf5cb7067a8bd6d8666046029d390d50a8f01da063ef3e67b900bde3d854e610",
+    "worker.js": "6a509bb6753aacbe957c71653d5ff8039fc6cfdabfaa760227be5cacc2bd0569",
+    "geo.js": "72481ad5da8e32ffd859338ec46b18c92f1a48e09b4f024f4bebc7cd629a2651",
+    "data.js": "ea8cc7a6e7080efded729554700d36b93c2aa19de98f1a70eba67de4816e2ab6",
+    "batch.js": "363f015035309e986ef344f4c529e65f7fa037af78328cd8ea66c9d8c2648eb0",
+    "route-library.json": "8e91bec88bf9447a9f8aef2296c1e6218d4840ae9bbde39f9b18bb51fcee09d8",
+    "california.json": "7a9b38fa07c169af8d1dc5ab43047b414a367633ccec476c1c3ecb3c6ed9a3b5",
+  };
+  for (const [file, sha] of Object.entries(expected)) assert.equal(hash(await readFile(new URL(file, import.meta.url))), sha, `${file} must not change in this page-only update`);
+  const server = await readFile(new URL("server.js", import.meta.url), "utf8");
+  assert.equal(hash(server.slice(0, server.indexOf("// Live suggestions use Photon"))), "a9518a3a5e3a2c324c59c6d9f88d4f336163b5607436cba32cddf0534660319f");
+  assert.equal(hash(server.slice(server.indexOf("// Submit-only US geocoding"))), "d9d70f0fa63d50af97c5ea2db722381a6bbef0b66f6571db95fd6c68aa86a0a2");
+  const ui = await readFile(new URL("workspace.js", import.meta.url), "utf8");
+  for (const [start,end,sha] of [
+    ["async function planRoute(", "async function solveSelected()", "ac00cd9f0264c721d6d814fec5066972af7713839d8bdb186b60ac00b120bc3c"],
+    ["async function enrichCandidates(", "async function planRoute(", "0b5ba063b0940630210eb2869c57c116ae38339da1ca79933c71a8d9631b6a23"],
+    ["function renderLibrary()", "function renderLog()", "f3f584160529bba5d01a1c911167d52620306d82b8d6398f2db54c55502d2a52"],
+  ]) assert.equal(hash(ui.slice(ui.indexOf(start),ui.indexOf(end))),sha);
+});
 const suppliedFuelTable = [
   [
     "pump_name",
@@ -320,6 +347,124 @@ test("600 random instances match exhaustive global minimum over every stop subse
   assert.ok(feasible > 50);
 });
 
+test("Fuel Stops search aliases expand normal matching without state-name expansion", () => {
+  const rows = [
+    { id: "road", name: "Love's #12", city: "Mount Vernon", state: "TX", highway: "US-200", highways: ["US-200"], price: 5 },
+    { id: "stop", name: "Pilot - CA200", city: "Mt Vernon", state: "CA", highway: "I-10", highways: ["I-10"], price: 4 },
+    { id: "alias", name: "Love's #33", city: "St Louis", location: "N MacDonald", state: "MO", highway: "I-40", highways: ["I-40"], price: 3 },
+  ];
+  const original = JSON.stringify(rows);
+  assert.equal(stopNumber(rows[1]), "200");
+  assert.deepEqual(searchStops(rows, { query: "200" }).map((p) => p.id), ["stop", "road"]);
+  assert.equal(searchStops(rows, { query: "Mount Vernon" }).length, 2);
+  assert.equal(searchStops(rows, { query: "Mt Vernon" }).length, 2);
+  assert.equal(searchStops(rows, { query: "Saint Louis" })[0].id, "alias");
+  assert.equal(searchStops(rows, { query: "North McDonald" })[0].id, "alias");
+  for (const q of ["California", "Cali", "Cal"]) assert.equal(searchStops(rows, { query: q }).length, 0);
+  assert.equal(searchStops(rows, { query: "CA" })[0].id, "stop");
+  assert.deepEqual(searchStops(rows, { sort: "high" }).map((p) => p.price), [5,4,3]);
+  assert.deepEqual(searchStops(rows, { sort: "low" }).map((p) => p.price), [3,4,5]);
+  assert.equal(JSON.stringify(rows), original);
+});
+test("Highway OFF uses all map records; Highway ON uses Search AND State AND highway OR", () => {
+  const rows = [
+    { id: "a", name: "Stop A", state: "TX", highways: ["I-10"], price: 3 },
+    { id: "b", name: "Stop B", state: "TX", highways: ["I-40"], price: 4 },
+    { id: "c", name: "Stop C", state: "CA", highways: ["I-10"], price: 5 },
+  ];
+  let selected = new Set();
+  let filtered = searchStops(rows, { query: "Stop A", state: "TX", highways: selected });
+  assert.equal(filtered.length, 1); assert.equal(stopMapRows(rows, filtered, selected), rows);
+  selected = new Set(["I-10", "I-40"]);
+  filtered = searchStops(rows, { state: "TX", highways: selected });
+  assert.deepEqual(filtered.map((p) => p.id), ["a","b"]);
+  assert.equal(stopMapRows(rows, filtered, selected), filtered);
+  assert.equal(searchStops(rows, { state: "CA", highways: new Set(["I-40"]) }).length, 0);
+});
+test("Fuel display merges only missing snapshot values and keeps live zeros and original records", () => {
+  const v = { id: "1", name: "TRUCK 1", fuelPercent: null, speed: 0, heading: 0 };
+  const detail = { mpg: 6.62, mpgSource: "Samsara report", historyFuel: { value: 67, time: "2026-09-12T10:00:00Z" } };
+  assert.equal(mergeVehicleDetail(v, detail).fuelPercent, 67);
+  assert.equal(mergeVehicleDetail(v, detail).mpg, 6.62);
+  assert.equal(mergeVehicleDetail({ ...v, fuelPercent: 0 }, detail).fuelPercent, 0);
+  assert.equal(v.fuelPercent, null);
+  assert.equal(headingDegrees(0), 0); assert.equal(headingDegrees(null), 0); assert.equal(headingDegrees(450), 90);
+  assert.equal(activeVehicles([v, { name: "DeAcTiVaTeD 22" }]).length, 1);
+  assert.equal(routeHighways({ summary: "Test route, no highway supplied" }), "");
+  assert.equal(routeHighways({ summary: "via I-10 and I-75" }), "I-10 / I-75");
+});
+test("Driver and partner messages match Div's wording, stars, OR lines and blank highway fields", () => {
+  const rows = parseMessageTable([
+    ["StoreNumber", "Location", "Highway", "Exit"],
+    ["245", "Oklahoma City, OK", "I-44", "113"],
+    ["211", "Oklahoma City, OK", "I-35", "120"],
+    ["712", "Newcastle, OK", "I-44", "107/24th St"],
+    ["88", "Yukon, OK", "", ""],
+  ], "Love's");
+  const data = { driver: "Fid", partner: "Vid", route: "I-10", pairs: [{a:rows[0],b:rows[1]},{a:rows[2],b:rows[3]}] };
+  const body = "*245  Oklahoma City, OK ( HW: I-44, Exit: 113 )\nOR\n*211  Oklahoma City, OK ( HW: I-35, Exit: 120 )\n\n**712  Newcastle, OK ( HW: I-44, Exit: 107/24th St )\nOR\n**88  Yukon, OK ( HW: , Exit:  )";
+  assert.equal(customMessage(data), `Hey Fid, I have listed down the suggested Love's fuel stations with their nearest city for your consideration.\n\n${body}\n\nWe will appreciate if you fill up the tank at these fuel stops. This Result is based on the route (I-10). If you change your route please let me know.\n\nDrive Safe!`);
+  assert.equal(customMessage({...data,audience:"team"}), `Hey Vid, We spoke to Fid, I have listed down the suggested Love's fuel stations with their nearest city for filling up your vehicle tank. The company is getting a discount on filling up at these fuel stops.\n\n${body}\n\nWe will appreciate if you fill up the tank at these fuel stops. This Result is based on the route Fid discussed with us (I-10). If you change your route please let me know.\n\nDrive Safe!`);
+  assert.doesNotMatch(customMessage({...data,pairs:[{a:rows[0]}]}), /\nOR\n/);
+  assert.equal(resolveMessageStop("245", rows).record.id, rows[0].id);
+  const mixed = [...rows, {...rows[0], id:"Pilot:245",brand:"Pilot",name:"Pilot #245"}];
+  assert.equal(resolveMessageStop("245", mixed).ambiguous, true);
+  assert.equal(resolveMessageStop("Pilot #245", mixed).record.brand, "Pilot");
+  assert.equal(resolveMessageStop("999", rows).record, null);
+});
+
+test("Autocomplete rejects stale replies, hides on dismissal and returns on typing", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM('<input id="origin"><div id="suggestions" hidden></div>');
+  const oldDocument = globalThis.document; globalThis.document = dom.window.document;
+  const input = document.getElementById("origin"), box = document.getElementById("suggestions");
+  const pending = new Map(); let selected;
+  const control = bindPlaceSearch(input, box, {
+    suggest: (q) => new Promise((resolve) => pending.set(q, resolve)), submit: async () => [],
+    coordinates: () => null, select: (p) => selected = p,
+  });
+  try {
+    input.value = "Fres"; const older = control.search();
+    input.value = "Fresno"; const newer = control.search();
+    pending.get("Fresno")([{label:"Fresno, CA",lat:36.7,lng:-119.7}]); await newer;
+    pending.get("Fres")([{label:"Wrong stale location",lat:1,lng:2}]); await older;
+    assert.match(box.textContent, /Fresno, CA/); assert.doesNotMatch(box.textContent, /Wrong/);
+    assert.equal(box.hidden, false);
+    control.close(); assert.equal(box.hidden, true);
+    input.value = "Fresh"; const dismissed = control.search(); control.close();
+    pending.get("Fresh")([{label:"Too late",lat:1,lng:2}]); await dismissed; assert.equal(box.hidden, true);
+    input.value = "Fresno"; input.dispatchEvent(new dom.window.Event("input"));
+    await new Promise((resolve) => setTimeout(resolve, 480));
+    pending.get("Fresno")([{label:"Fresno, CA",lat:36.7,lng:-119.7}]);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    assert.equal(box.hidden, false); box.querySelector("button").click();
+    assert.equal(input.value, "Fresno, CA"); assert.equal(selected.lat,36.7); assert.equal(box.hidden,true);
+    assert.equal(JSON.parse(input.dataset.coordinates).lng,-119.7);
+  } finally { control.close(); dom.window.close(); if (oldDocument === undefined) delete globalThis.document; else globalThis.document = oldDocument; }
+});
+test("Message editor migrates old drafts, permits manual stops, and isolates plan edits", async () => {
+  const { JSDOM } = await import("jsdom"); const dom = new JSDOM('<div id="editor"></div>');
+  const oldDocument = globalThis.document; globalThis.document = dom.window.document;
+  try {
+    const rows = parseMessageTable([["StoreNumber","Location","Highway","Exit"],["245","Oklahoma City, OK","I-44","113"]],"Love's");
+    const editor = new MessageEditor(document.getElementById("editor"), { prefix:"test", api:async()=>({rows}),readFile:async()=>[],copy:async()=>{} });
+    editor.setFallback(rows,"Love's");
+    editor.restore({rows,pairs:[{a:"Love's:245",b:""}],fields:{messageDriver:"Fid",messagePartner:"Vid",messageRoute:"I-10"}});
+    assert.equal(editor.inputs().pairs[0].a.store,"245"); assert.equal(editor.inputs().pairs[0].b,null);
+    const plan = {stops:[{...rows[0]}]}; const original = JSON.stringify(plan);
+    editor.setPlan(plan,"I-10",{driver:"Fid",partner:"Vid"});
+    const input = editor.q('[data-detail="0:a:highway"]'); input.value = "I-70"; input.dispatchEvent(new dom.window.Event("input"));
+    assert.match(editor.q('[data-preview="driver"]').value,/HW: I-70/); assert.equal(JSON.stringify(plan),original);
+    const alternate = editor.q('[data-stop-input="0:b"]'); alternate.value = "999"; alternate.dispatchEvent(new dom.window.Event("input"));
+    assert.ok(editor.error); assert.equal(editor.q('[data-copy="driver"]').disabled,true);
+    const place = editor.q('[data-detail="0:b:location"]'); place.value="Amarillo, TX"; place.dispatchEvent(new dom.window.Event("input"));
+    assert.equal(editor.error,""); assert.match(editor.q('[data-preview="driver"]').value,/\nOR\n\*999  Amarillo, TX/);
+    const snap = editor.snapshot(); editor.restore(snap); assert.deepEqual(editor.snapshot().pairs,snap.pairs);
+    editor.q('[data-sheet-toggle]').click(); assert.equal(editor.q('[data-sheet-form]').hidden,false);
+    assert.ok(editor.root.textContent.includes("StoreNumber,Latitude,Longitude,Location,Highway,Exit"));
+  } finally { dom.window.close(); if (oldDocument === undefined) delete globalThis.document; else globalThis.document = oldDocument; }
+});
+
 test("CSV handles BOM, quoted commas, newlines, aliases and non-positive price rejection", () => {
   const csv =
     '\uFEFFReport,,,,,\nStore No,Best Discounted Price,Latitude,Longitude,City,State\n123,4.1234,35,-100,"City, name",TX\n124,0,35,-99,Other,TX\n';
@@ -368,7 +513,8 @@ test("Message brands and pump IDs stay distinct; Half Tank text agrees with the 
     ],
     "Pilot",
   );
-  assert.match(customMessage({ pairs: [{ a: rows[0] }] }), /Pilot #123/);
+  assert.match(customMessage({ pairs: [{ a: rows[0] }] }), /Pilot fuel stations/);
+  assert.match(customMessage({ pairs: [{ a: rows[0] }] }), /\*123  Fresno, CA/);
   const p = solveFuelPlan({
     distance: 70,
     stations: [
@@ -427,7 +573,8 @@ test("Supplied six-column message format uses Location, Highway and Exit without
   assert.equal(rows[2].exit, "");
   assert.equal(rows[3].exit, "Mile 85");
   const text = customMessage({ pairs: [{ a: rows[1] }] });
-  assert.match(text, /Love's #712.*Newcastle, OK.*I-44.*107\/24th St/);
+  assert.match(text, /Love's fuel stations/);
+  assert.match(text, /\*712.*Newcastle, OK.*I-44.*107\/24th St/);
   assert.doesNotMatch(text, /35\.277217|97\.601128/);
 });
 test("One-mile corridor uses distance to any segment, including between vertices", () => {
@@ -616,22 +763,34 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     },
   };
   const chain = () => ({
+    events: {},
+    layers: [],
     addTo() {
+      arguments[0]?.layers?.push(this);
       return this;
     },
-    on() {
+    on(event, fn) {
+      this.events[event] = fn;
       return this;
     },
-    bindPopup() {
+    bindPopup(content) {
+      this.popup = content;
       return this;
     },
-    bindTooltip() {
+    bindTooltip(content) {
+      this.tooltip = content;
       return this;
     },
+    setIcon(icon) { this.icon = icon; return this; },
+    setPopupContent(content) { this.popup = content; return this; },
+    setTooltipContent(content) { this.tooltip = content; return this; },
+    openPopup() { this.open = true; return this; },
+    removeLayer(layer) { this.layers = this.layers.filter((l) => l !== layer); },
     bringToBack() {
       return this;
     },
     clearLayers() {
+      this.layers.length = 0;
       return this;
     },
     setLatLng() {
@@ -646,9 +805,11 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
   });
   const map = {
     ...chain(),
-    setView() {
+    setView(point, zoom) {
+      this.point = point; this.zoom = zoom;
       return this;
     },
+    getZoom() { return this.zoom; },
     removeLayer() {},
     hasLayer() {
       return false;
@@ -656,14 +817,15 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     invalidateSize() {},
     fitBounds() {},
   };
+  const groups = [];
   const L = {
     map: () => map,
     tileLayer: chain,
-    layerGroup: chain,
+    layerGroup: () => { const group = chain(); groups.push(group); return group; },
     control: { scale: chain },
     polyline: chain,
-    marker: chain,
-    circleMarker: chain,
+    marker: (point, options) => Object.assign(chain(), { point, icon: options.icon }),
+    circleMarker: (point) => Object.assign(chain(), { point }),
     divIcon: (x) => x,
     popup: chain,
     latLngBounds: (x) => x,
@@ -731,6 +893,8 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
       if (fleetBarrier) await fleetBarrier;
       return response({
         vehicles: [
+          { id: "gone", name: "Deactivated TRUCK 999", lat: 35, lng: -100 },
+          { id: "history", name: "TRUCK 156", lat: 35, lng: -99, location: "I 20, Callahan County, TX", fuelPercent: null, speed: 72, heading: 0 },
           {
             id: "104",
             name: "TRUCK 104",
@@ -752,9 +916,9 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     }
     if (path.startsWith("/api/vehicle-detail"))
       return response({
-        mpg: 7,
+        mpg: path.includes("vehicle=history") ? 6.62 : 7,
         mpgSource: "Test report",
-        historyFuel: null,
+        historyFuel: path.includes("vehicle=history") ? { value: 67, time: new Date().toISOString() } : null,
         warnings: [],
       });
     if (path === "/api/routes")
@@ -852,8 +1016,88 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     const summary = tools.get("read_fco_workspace").execute({});
     assert.equal(summary.plans[0].status, "optimal");
     el("results").querySelector("[data-plan-message]").click();
-    assert.match(el("resultMessage").value, /full tank/);
+    assert.match(el("resultPreview").value, /suggested.*fuel stations/);
+    assert.match(el("resultPreview").value, /Drive Safe!/);
     assert.equal(el("messageDialog").open, true);
+    await t.test("Planner and standalone message editors share fields, formatting, templates and editable alternatives", async () => {
+      const editor = el("resultEditor");
+      assert.ok(editor.querySelector('[href="/message-template.csv"]'));
+      assert.ok(editor.querySelector('[data-sheet-toggle]'));
+      assert.equal(editor.querySelector('[data-stop-input="0:b"]').value, "");
+      input("resultDriver", "Fid"); input("resultPartner", "Vid"); input("resultRoute", "I-10");
+      assert.match(el("resultPreview").value, /Hey Fid, I have listed/);
+      assert.match(el("resultPartnerPreview").value, /Hey Vid, We spoke to Fid/);
+      assert.match(el("resultPartnerPreview").value, /route Fid discussed with us \(I-10\)/);
+      assert.doesNotMatch(editor.textContent, /Filling instruction/);
+      assert.equal(el("resultRoute").value, "I-10");
+      const stop = editor.querySelector('[data-detail="0:a:highway"]');
+      stop.value = "I-40"; stop.dispatchEvent(new w.Event("input"));
+      assert.match(el("resultPreview").value, /HW: I-40/);
+      assert.equal(tools.get("read_fco_workspace").execute({}).plans[0].cost, summary.plans[0].cost);
+      el("messageDialog").close();
+    });
+    await t.test("Fuel-only edits reuse routes; truck and waypoint edits require Find routes", async () => {
+      input("endFuel", "60");
+      assert.match(el("routeInputStatus").textContent, /Fuel changes only/);
+      await tools.get("calculate_fco_fuel_plans").execute({});
+      el("addWaypoint").click();
+      const wp = el("waypointRows").querySelector("input");
+      wp.value = "35, -99"; wp.dispatchEvent(new w.Event("input", { bubbles: true }));
+      await assert.rejects(tools.get("calculate_fco_fuel_plans").execute({}), /locations or routing/);
+      el("waypointRows").querySelector("[data-via-remove]").click();
+      assert.equal(el("waypoints").value, "");
+      el("addWaypoint").click(); el("addWaypoint").click();
+      const inputs = [...el("waypointRows").querySelectorAll("input")];
+      for (const [i, wp] of inputs.entries()) { wp.value = `35, ${-99+i}`; wp.dispatchEvent(new w.Event("input", { bubbles: true })); }
+      el("waypointRows").querySelector('[data-via-down="0"]').click();
+      assert.equal(el("waypoints").value, "35, -98\n35, -99");
+      input("waypoints", "");
+    });
+    await t.test("Deactivated trucks are hidden; fleet history fuel, MPG and map selection use the same records", async () => {
+      w.document.querySelector('[data-view="fleet"]').click();
+      await until(() => el("fleetRows").textContent.includes("6.62"));
+      assert.doesNotMatch(el("fleetRows").textContent, /999|Deactivated/);
+      assert.doesNotMatch(el("trucks").innerHTML, /999|Deactivated/);
+      assert.equal(el("heatBtn").hidden, true); assert.equal(el("mapCaption").hidden, true);
+      assert.doesNotMatch(el("fleetRows").textContent, /Plan trip/);
+      assert.match(el("fleetRows").textContent, /67%/);
+      const row = el("fleetRows").querySelector('[data-fleet-row="history"]'); row.click();
+      assert.ok(map.zoom >= 8);
+      assert.ok(el("fleetRows").querySelector('[data-fleet-row="history"]').classList.contains("focused-truck"));
+      const marker = groups[3].layers.find((m) => m.popup?.includes("TRUCK 156"));
+      assert.match(marker.popup, /72 MPH.*67%.*6.62/); assert.equal(marker.tooltip, marker.popup);
+      assert.match(marker.icon.html, /rocket/);
+      w.document.querySelector('[data-view="planner"]').click();
+      assert.equal(groups[3].layers.length, 2);
+      assert.ok(groups[3].layers.every((m) => m.icon.html.includes("ufo")));
+      const before = el("truck").value;
+      groups[3].layers.find((m) => m.popup?.includes("TRUCK 156")).events.click();
+      assert.equal(el("truck").value, before);
+    });
+    await t.test("Fuel Stops list-only search, marker selection and price sort/reset preserve the master and theme", async () => {
+      w.document.querySelector('[data-view="pumps"]').click();
+      const master = el("master").value, theme = el("theme").value;
+      input("pumpSearch", "Test2");
+      assert.equal(el("pumpRows").querySelectorAll("[data-pump-row]").length, 1);
+      assert.equal(groups[1].layers.length, 3);
+      groups[1].layers.find((m) => m.popup.includes("Test3")).events.click();
+      assert.equal(el("pumpSearch").value, "");
+      assert.equal(el("pumpRows").querySelectorAll("[data-pump-row]").length, 3);
+      input("pumpSearch", "Test3");
+      groups[1].layers.find((m) => m.popup.includes("Test3")).events.click();
+      assert.equal(el("pumpSearch").value, "Test3");
+      el("cyclePrice").click(); assert.equal(el("priceSort").value, "high");
+      el("cyclePrice").click(); assert.equal(el("priceSort").value, "low");
+      el("cyclePrice").click(); assert.equal(el("priceSort").value, "master");
+      input("highwaySearch", "I-40"); el("clearHighwaySearch").click(); assert.equal(el("highwaySearch").value, "");
+      el("clearStops").click();
+      assert.equal(el("pumpSearch").value, ""); assert.equal(el("priceSort").value, "master");
+      assert.equal(el("master").value, master); assert.equal(el("theme").value, theme);
+      assert.equal(el("pumpRows").querySelectorAll(".focused-pump").length, 0);
+      assert.equal(w.document.querySelector('[data-view="library"]').hidden, true);
+      w.document.querySelector('[data-view="library"]').click();
+      assert.equal(el("libraryContent").hidden, true); assert.equal(el("workspace").dataset.view, "planner");
+    });
     await t.test("Manual and scheduled fleet refreshes share one pending request", async () => {
       let release;
       fleetBarrier = new Promise((resolve) => { release = resolve; });
@@ -909,7 +1153,7 @@ test("DOM workflow: editable live values, manual overrides, themes, routes and v
     el("workbookSheet").value = "1";
     el("workbookUse").click();
     await uploading;
-    assert.match(el("sourceBadge").textContent, /prices.xlsx · 1 pumps/);
+    assert.match(el("sourceBadge").textContent, /prices.xlsx · 1 stops/);
   } finally {
     for (const timer of timers) clearTimeout(timer);
     dom.window.close();
@@ -963,6 +1207,14 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
     const u = new URL(input);
     if (u.hostname === "127.0.0.1") return originalFetch(input, options);
     requests.push({ url: u.toString(), auth: options.headers?.Authorization });
+    if (u.hostname === "photon.komoot.io") {
+      assert.equal(u.searchParams.get("countrycode"), "US");
+      return json({ features: [
+        { properties: { countrycode:"US",name:"Fresno",state:"California" }, geometry:{coordinates:[-119.7,36.7]} },
+        { properties: { countrycode:"CA",name:"Foreign city" }, geometry:{coordinates:[-119,36]} },
+        { properties: { countrycode:"US",name:"Bad coordinate" }, geometry:{coordinates:[null,36]} },
+      ] });
+    }
     if (u.hostname === "oauth2.googleapis.com")
       return json({ access_token: "TEST_GOOGLE_OAUTH", expires_in: 3600 });
     if (u.hostname === "sheets.googleapis.com") {
@@ -1176,6 +1428,16 @@ test("Backend: private registry, multiple tokens, pagination, client isolation a
       return { status: r.status, data: await r.json() };
     };
     const config = (await call("config")).data;
+    await t.test("Autocomplete uses a separately cached provider and rejects invalid/non-US responses", async () => {
+      const first = await call("suggest?q=Fresno");
+      assert.equal(first.status,200); assert.equal(first.data.results.length,1);
+      assert.equal(first.data.results[0].label,"Fresno, California");
+      const count = requests.filter((r) => new URL(r.url).hostname === "photon.komoot.io").length;
+      await call("suggest?q=Fresno");
+      assert.equal(requests.filter((r) => new URL(r.url).hostname === "photon.komoot.io").length,count);
+      assert.equal((await call("suggest?q=F")).data.results.length,0);
+      assert.equal(requests.some((r) => new URL(r.url).hostname === "nominatim.openstreetmap.org"),false);
+    });
     assert.equal(config.clients.length, 2);
     assert.equal(config.clients[0].connections, 2);
     assert.equal(config.masters.length, 1);
